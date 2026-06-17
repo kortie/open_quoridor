@@ -1,0 +1,104 @@
+# IDE - Android Studio, IntelliJ
+*.iml
+.idea/
+.gradle/
+*.gradle.bak
+gradle-app.setting
+!gradle-wrapper.jar
+.classpath
+.cproject
+*.c9/
+*.class
+*.jar
+*.jmod
+
+# Android Studio/IntelliJ specific
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/modules/
+/.idea/workspace.xml
+/.idea/tasks.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+/.idea/vcs.xml
+/.idea/gradle.xml
+/.idea/misc.xml
+/.idea/shelf
+.idea/
+*.iml
+
+# Gradle cache and dependencies
+.gradle/
+gradle/wrapper/gradle-wrapper.properties
+!gradle-wrapper.jar
+
+# Local configuration file
+/local.properties
+local.properties
+
+# Build outputs
+/build
+/captures
+bin/
+gen/
+out/
+
+# APK and bundle outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+*.obb
+
+# Native compilation
+.externalNativeBuild
+.cxx/
+
+# Test outputs
+reports/
+coverage/
+androidTest-results/
+test-results/
+
+# Lint outputs
+lint-results*.xml
+lint-baseline.xml
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor backups
+*~
+*.swp
+*.swo
+*.swn
+*.bak
+*.tmp
+
+# Proguard mapping files
+mapping.txt
+seeds.txt
+usage.txt
+obfuscationMapping.txt
+configuration.txt
+dump.txt
+
+# Keystore files
+*.keystore
+*.jks
+*.p12
+
+# Private files
+*.private.properties
+secrets.properties
+
+# Generated files
+/gen
+/out

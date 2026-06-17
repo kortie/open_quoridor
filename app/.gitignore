@@ -1,0 +1,56 @@
+# Build outputs
+/build
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Gradle cache and dependencies
+.gradle
+*.jar
+!gradle-wrapper.jar
+
+# Local configuration file
+local.properties
+
+# IDE files
+.idea
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+*.swp
+*.swo
+*~
+
+# Android Studio specific
+.DS_Store
+.cxx/
+
+# Compiled files
+bin/
+gen/
+out/
+
+# Test outputs
+reports/
+coverage/
+
+# Lint outputs
+lint-results.xml
+lint-results*.xml
+
+# APK and bundle outputs
+app-debug.apk
+app-release.apk
+app-release.aab
+*.obb
+
+# Proguard mapping files
+mapping.txt
+seeds.txt
+usage.txt
+obfuscationMapping.txt
