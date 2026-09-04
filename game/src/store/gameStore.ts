@@ -204,9 +204,9 @@ function applyMove(state: GameState, move: Move) {
   // AI turn
   if (nextPlayer === 'ai') {
     // Show thinking state immediately
-    setTimeout(() => {
+    setTimeout(async () => {
       const currentState = useGameStore.getState();
-      const aiMove = getAIMove(currentState);
+      const aiMove = await getAIMove(currentState);
       if (aiMove) {
         applyMove(currentState, aiMove);
       }

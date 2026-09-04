@@ -5,16 +5,19 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/src/index.js",
+    "test": "tsc && node dist/tests/ai.board.test.js && node dist/tests/ai.pathfind.test.js && node dist/tests/ai.eval.test.js && node dist/tests/ai.search.test.js",
+    "selfplay": "tsc && node dist/tools/selfplay.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "axios": "^1.5.0",
-    "jsonwebtoken": "^9.1.0",
+    "jsonwebtoken": "^9.0.0",
     "pg": "^8.11.2",
-    "bcrypt": "^5.1.1"
+    "bcrypt": "^5.1.1",
+    "@anthropic-ai/sdk": "^0.24.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

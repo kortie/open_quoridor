@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_21" default="true" project-jdk-name="21" project-jdk-type="JavaSDK">
+    <output url="file://$PROJECT_DIR$/out" />
+  </component>
+  <component name="StoredSessionsInfoStore">
+    <option name="sessions">
+      <list>
+        <SessionInfoState>
+          <option name="id" value="20260422-081952-6217895a-532b-432c-bc2b-53b271e70e9e" />
+          <option name="lastUpdateTimestamp" value="1776813592847" />
+          <option name="responseMode" value="Agent" />
+          <option name="title" value="New Agent Session" />
+          <option name="user" value="isaac2.lee@samsungmcgcp.net" />
+        </SessionInfoState>
+      </list>
+    </option>
+  </component>
+</project>

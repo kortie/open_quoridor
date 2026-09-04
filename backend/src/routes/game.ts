@@ -1,6 +1,7 @@
 import express, { Response } from 'express';
 import { AuthRequest, authMiddleware } from '../middleware/auth.js';
 import pool from '../db.js';
+import { getAIMove } from '../services/aiService.js';
 
 const router = express.Router();
 
@@ -130,6 +131,23 @@ router.get('/stats', authMiddleware, async (req: AuthRequest, res: Response) => 
     });
   } catch (error: any) {
     console.error('❌ Get stats error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// AI move decision
+router.post('/ai-move', async (req: any, res: Response) => {
+  try {
+    const aiDecisionRequest = req.body;
+
+    if (!aiDecisionRequest || !aiDecisionRequest.aiLevel) {
+      return res.status(400).json({ error: 'Invalid request body' });
+    }
+
+    const move = await getAIMove(aiDecisionRequest);
+    res.json(move);
+  } catch (error: any) {
+    console.error('❌ AI move error:', error);
     res.status(500).json({ error: error.message });
   }
 });
