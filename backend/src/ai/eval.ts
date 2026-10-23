@@ -1,5 +1,6 @@
 import { QState, EvalWeights } from './types.js';
-import { getDistance, getPathDiversity } from './pathfind.js';
+import { getDistance, getPathDiversity, wallsDistance, wallsCorridor } from './pathfind.js';
+import { EState } from './state.js';
 
 // Special score thresholds
 export const WIN_THRESHOLD = 100000;
@@ -123,4 +124,34 @@ export function evaluateForTT(
   weights: EvalWeights = DEFAULT_WEIGHTS
 ): number {
   return evaluate(state, moves, 0, weights);
+}
+
+/**
+ * Same evaluation as `evaluate`, on the search-internal state. `mobility` is the
+ * number of legal pawn moves for the side to move.
+ */
+export function evaluateState(s: EState, mobility: number, depth: number, weights: EvalWeights): number {
+  const me = s.turn;
+  const op: 0 | 1 = me === 0 ? 1 : 0;
+  const myCell = me === 0 ? s.p0 : s.p1;
+  const opCell = me === 0 ? s.p1 : s.p0;
+  const d_me = wallsDistance(s.w, myCell, me === 0 ? 8 : 0, opCell);
+  const d_op = wallsDistance(s.w, opCell, op === 0 ? 8 : 0, myCell);
+
+  if (d_me === 0) return WIN_THRESHOLD - depth;
+  if (d_op === 0) return LOSS_THRESHOLD + depth;
+  if (d_me === Infinity) return LOSS_THRESHOLD + depth;
+  if (d_op === Infinity) return WIN_THRESHOLD - depth;
+
+  const w_me = me === 0 ? s.n0 : s.n1;
+  const w_op = me === 0 ? s.n1 : s.n0;
+  const p_me = Math.min(wallsCorridor(s.w, myCell, me === 0 ? 8 : 0), 4);
+
+  let score = 0;
+  score += weights.w1 * (d_op - d_me);
+  score += weights.w2 * (w_me - w_op);
+  score += weights.w3 * (mobility / 5.0);
+  score += weights.w4 * p_me;
+  score += getPhaseBonus(d_me, d_op, w_me, w_op, weights);
+  return score;
 }

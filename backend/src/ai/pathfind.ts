@@ -81,6 +81,54 @@ const queueBuf = new Int8Array(N);
 const fwdBuf = new Int16Array(N);
 const bwdBuf = new Int16Array(N);
 
+/**
+ * Per-row blocking masks for the walls currently loaded. Bit c of downBlk[r] is set
+ * when (r,c)<->(r+1,c) is walled; bit c of rightBlk[r] when (r,c)<->(r,c+1) is.
+ * Rebuilt only when the wall set changes, so a BFS costs no per-edge bit lookups.
+ */
+const downBlk = new Int32Array(8);
+const rightBlk = new Int32Array(9);
+let loadedHLo = -1;
+let loadedHHi = -1;
+let loadedVLo = -1;
+let loadedVHi = -1;
+
+function anchorRow(lo: number, hi: number, r: number): number {
+  return r < 4 ? (lo >>> (r * 8)) & 255 : (hi >>> ((r - 4) * 8)) & 255;
+}
+
+export function loadWalls(w: Walls): void {
+  if (w.hLo === loadedHLo && w.hHi === loadedHHi && w.vLo === loadedVLo && w.vHi === loadedVHi) return;
+  loadedHLo = w.hLo;
+  loadedHHi = w.hHi;
+  loadedVLo = w.vLo;
+  loadedVHi = w.vHi;
+  let prevV = 0;
+  for (let r = 0; r < 9; r++) {
+    if (r < 8) {
+      const h = anchorRow(w.hLo, w.hHi, r);
+      downBlk[r] = h | (h << 1);
+    }
+    const v = r < 8 ? anchorRow(w.vLo, w.vHi, r) : 0;
+    rightBlk[r] = v | prevV;
+    prevV = v;
+  }
+}
+
+/** True if a step from (r,c) in direction dir (N,S,E,W) leaves the board or crosses a loaded wall. */
+export function stepBlocked(r: number, c: number, dir: number): boolean {
+  switch (dir) {
+    case 0:
+      return r === 0 || ((downBlk[r - 1] >> c) & 1) === 1;
+    case 1:
+      return r === 8 || ((downBlk[r] >> c) & 1) === 1;
+    case 2:
+      return c === 8 || ((rightBlk[r] >> c) & 1) === 1;
+    default:
+      return c === 0 || ((rightBlk[r] >> (c - 1)) & 1) === 1;
+  }
+}
+
 function tryVisit(next: number, d: number, from: number, tail: number): number {
   if (distBuf[next] >= 0) return tail;
   distBuf[next] = d;
@@ -95,6 +143,7 @@ function tryVisit(next: number, d: number, from: number, tail: number): number {
  * distBuf/parentBuf hold the result.
  */
 function runBfs(w: Walls, start: number, goalRow: number, opp: number): number {
+  loadWalls(w);
   distBuf.fill(-1);
   distBuf[start] = 0;
   parentBuf[start] = -1;
@@ -110,10 +159,9 @@ function runBfs(w: Walls, start: number, goalRow: number, opp: number): number {
     const d = distBuf[cur] + 1;
 
     for (let dir = 0; dir < 4; dir++) {
+      if (stepBlocked(cr, cc, dir)) continue;
       const nr = cr + DR[dir];
       const nc = cc + DC[dir];
-      if (nr < 0 || nr > 8 || nc < 0 || nc > 8) continue;
-      if (blocked(w, cr, cc, nr, nc)) continue;
       const next = nr * 9 + nc;
 
       if (next !== opp) {
@@ -121,24 +169,39 @@ function runBfs(w: Walls, start: number, goalRow: number, opp: number): number {
         continue;
       }
 
-      const jr = nr + DR[dir];
-      const jc = nc + DC[dir];
-      if (jr >= 0 && jr <= 8 && jc >= 0 && jc <= 8 && !blocked(w, nr, nc, jr, jc)) {
-        tail = tryVisit(jr * 9 + jc, d, cur, tail);
+      if (!stepBlocked(nr, nc, dir)) {
+        tail = tryVisit((nr + DR[dir]) * 9 + nc + DC[dir], d, cur, tail);
         continue;
       }
 
       const p0 = DR[dir] !== 0 ? 2 : 0;
       for (let k = 0; k < 2; k++) {
-        const gr = nr + DR[p0 + k];
-        const gc = nc + DC[p0 + k];
-        if (gr < 0 || gr > 8 || gc < 0 || gc > 8) continue;
-        if (blocked(w, nr, nc, gr, gc)) continue;
-        tail = tryVisit(gr * 9 + gc, d, cur, tail);
+        if (stepBlocked(nr, nc, p0 + k)) continue;
+        tail = tryVisit((nr + DR[p0 + k]) * 9 + nc + DC[p0 + k], d, cur, tail);
       }
     }
   }
   return -1;
+}
+
+/** Distance from `start` to `goalRow` with the opponent at cell `opp` (-1 for none); Infinity if cut off. */
+export function wallsDistance(w: Walls, start: number, goalRow: number, opp: number): number {
+  const goal = runBfs(w, start, goalRow, opp);
+  return goal < 0 ? Infinity : distBuf[goal];
+}
+
+export function wallsReachable(w: Walls, start: number, goalRow: number, opp: number): boolean {
+  return runBfs(w, start, goalRow, opp) >= 0;
+}
+
+/** Like wallsDistance but also returns the cells of one shortest path. */
+export function wallsPath(w: Walls, start: number, goalRow: number, opp: number): FastPath {
+  const goal = runBfs(w, start, goalRow, opp);
+  if (goal < 0) return { distance: Infinity, cells: [] };
+  const cells: number[] = [];
+  for (let n = goal; n >= 0; n = parentBuf[n]) cells.push(n);
+  cells.reverse();
+  return { distance: distBuf[goal], cells };
 }
 
 function cellOf(state: QState, player: 0 | 1): number {
@@ -185,8 +248,8 @@ export function bfs(
   return { distance: distBuf[goal], pathCells };
 }
 
-/** Plain multi-source BFS over the whole board, ignoring pawns. */
-function fillDistances(w: Walls, out: Int16Array, sources: number[]): void {
+/** Plain multi-source BFS over the whole board, ignoring pawns. Walls must be loaded. */
+function fillDistances(out: Int16Array, sources: number[]): void {
   out.fill(-1);
   let head = 0;
   let tail = 0;
@@ -200,11 +263,8 @@ function fillDistances(w: Walls, out: Int16Array, sources: number[]): void {
     const cc = cur - cr * 9;
     const d = out[cur] + 1;
     for (let dir = 0; dir < 4; dir++) {
-      const nr = cr + DR[dir];
-      const nc = cc + DC[dir];
-      if (nr < 0 || nr > 8 || nc < 0 || nc > 8) continue;
-      if (blocked(w, cr, cc, nr, nc)) continue;
-      const next = nr * 9 + nc;
+      if (stepBlocked(cr, cc, dir)) continue;
+      const next = (cr + DR[dir]) * 9 + cc + DC[dir];
       if (out[next] < 0) {
         out[next] = d;
         queueBuf[tail++] = next;
@@ -213,27 +273,42 @@ function fillDistances(w: Walls, out: Int16Array, sources: number[]): void {
   }
 }
 
+const GOALS: number[][] = [[], []];
+for (let c = 0; c < 9; c++) {
+  GOALS[0].push(8 * 9 + c);
+  GOALS[1].push(c);
+}
+
+/**
+ * Marks in `out` (length 81) every cell lying on at least one shortest path from
+ * `start` to `goalRow` (pawns ignored) and returns how many there are.
+ */
+export function wallsCorridor(w: Walls, start: number, goalRow: number, out?: Uint8Array): number {
+  loadWalls(w);
+  const goals = goalRow === 8 ? GOALS[0] : GOALS[1];
+  fillDistances(fwdBuf, [start]);
+  fillDistances(bwdBuf, goals);
+
+  let best = 32767;
+  for (const g of goals) if (fwdBuf[g] >= 0 && fwdBuf[g] < best) best = fwdBuf[g];
+  if (out) out.fill(0);
+  if (best === 32767) return 0;
+
+  let width = 0;
+  for (let i = 0; i < N; i++) {
+    if (fwdBuf[i] >= 0 && bwdBuf[i] >= 0 && fwdBuf[i] + bwdBuf[i] === best) {
+      width++;
+      if (out) out[i] = 1;
+    }
+  }
+  return width;
+}
+
 /**
  * "Width" of the shortest-path corridor: the number of distinct cells that lie
  * on at least one shortest path to the goal row (pawns ignored). A wide corridor
  * is harder to cut off with a single wall.
  */
 export function getPathDiversity(state: QState, player: 0 | 1): number {
-  const w = splitWalls(state.h_walls, state.v_walls);
-  const goalRow = player === 0 ? 8 : 0;
-  const goals: number[] = [];
-  for (let c = 0; c < 9; c++) goals.push(goalRow * 9 + c);
-
-  fillDistances(w, fwdBuf, [cellOf(state, player)]);
-  fillDistances(w, bwdBuf, goals);
-
-  let best = 32767;
-  for (const g of goals) if (fwdBuf[g] >= 0 && fwdBuf[g] < best) best = fwdBuf[g];
-  if (best === 32767) return 0;
-
-  let width = 0;
-  for (let i = 0; i < N; i++) {
-    if (fwdBuf[i] >= 0 && bwdBuf[i] >= 0 && fwdBuf[i] + bwdBuf[i] === best) width++;
-  }
-  return width;
+  return wallsCorridor(splitWalls(state.h_walls, state.v_walls), cellOf(state, player), player === 0 ? 8 : 0);
 }
