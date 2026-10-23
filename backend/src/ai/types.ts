@@ -66,7 +66,9 @@ export const PAWN_MOVES = [
 ] as const;
 
 // Difficulty levels
-export type DifficultyLevel = 'Easy' | 'Normal' | 'Hard';
+export type DifficultyLevel = 'Easy' | 'Normal' | 'Hard' | 'VeryHard' | 'Expert';
+
+export const DIFFICULTY_LEVELS: readonly DifficultyLevel[] = ['Easy', 'Normal', 'Hard', 'VeryHard', 'Expert'];
 
 // Evaluation weights configuration
 export interface EvalWeights {

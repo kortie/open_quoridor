@@ -81,18 +81,7 @@ function fallbackMove(req: AIDecisionRequest): Move | null {
 }
 
 function mapDifficulty(level: AIDecisionRequest['aiLevel']): AI.DifficultyLevel {
-  switch (level) {
-    case 'Easy':
-      return 'Easy';
-    case 'Normal':
-      return 'Normal';
-    case 'Hard':
-    case 'VeryHard':
-    case 'Expert':
-      return 'Hard';
-    default:
-      return 'Normal';
-  }
+  return AI.DIFFICULTY_LEVELS.includes(level) ? level : 'Normal';
 }
 
 export async function getAIMove(req: AIDecisionRequest): Promise<Move | null> {

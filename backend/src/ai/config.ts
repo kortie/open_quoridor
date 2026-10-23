@@ -24,6 +24,8 @@ export function getDifficultyConfig(level: DifficultyLevel): DifficultyConfig {
         allowRandomization: false,
       };
     case 'Hard':
+    case 'VeryHard':
+    case 'Expert':
       // Spec: depth 5+, iterative deepening until the time limit.
       return {
         maxDepth: 9,

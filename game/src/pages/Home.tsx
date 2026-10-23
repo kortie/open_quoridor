@@ -8,6 +8,14 @@ interface HomeProps {
   onGameStart: () => void;
 }
 
+const LEVELS = [
+  { level: 'Easy', label: '🟢 쉬움' },
+  { level: 'Normal', label: '🟡 보통' },
+  { level: 'Hard', label: '🟠 어려움' },
+  { level: 'VeryHard', label: '🔴 매우 어려움' },
+  { level: 'Expert', label: '💀 전문가' },
+] as const;
+
 export const Home: React.FC<HomeProps> = ({ onGameStart }) => {
   const startGame = useGameStore((state) => state.startGame);
   const user = useAuthStore((state) => state.user);
@@ -56,17 +64,19 @@ export const Home: React.FC<HomeProps> = ({ onGameStart }) => {
         <div className="space-y-3">
           <label className="block text-sm font-semibold text-gray-300">난이도 선택</label>
           <div className="grid grid-cols-2 gap-2">
-            {(['Easy', 'Normal'] as const).map((level) => (
+            {LEVELS.map(({ level, label }, i) => (
               <button
                 key={level}
                 onClick={() => setSelectedLevel(level)}
                 className={`py-3 px-4 rounded-lg font-semibold transition-all ${
+                  i === LEVELS.length - 1 ? 'col-span-2' : ''
+                } ${
                   selectedLevel === level
                     ? 'bg-cyan-500 text-white'
                     : 'bg-[#1a1a2e] text-gray-300 border border-[#2a2a4e] hover:border-cyan-500'
                 }`}
               >
-                {level === 'Easy' ? '🟢 쉬움' : '🟡 보통'}
+                {label}
               </button>
             ))}
           </div>
