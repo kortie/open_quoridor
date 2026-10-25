@@ -6,6 +6,7 @@ export function calculateDistance(from: Position, to: Position): number {
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
+const AI_REQUEST_TIMEOUT_MS = 10000;
 
 async function getEngineMove(state: GameState): Promise<Move | null> {
   try {
@@ -14,8 +15,10 @@ async function getEngineMove(state: GameState): Promise<Move | null> {
 
     if (validMoves.length === 0) return null;
 
+    // Expert searches for up to 3s; allow for that plus queueing before giving up.
     const response = await fetch(`${API_BASE_URL}/game/ai-move`, {
       method: 'POST',
+      signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       headers: {
         'Content-Type': 'application/json',
       },
