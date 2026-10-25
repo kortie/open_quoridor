@@ -6,6 +6,7 @@ import { Home } from './pages/Home';
 import { Leaderboard } from './components/Leaderboard';
 import { UserProfile } from './components/UserProfile';
 import { saveGameRecord } from './services/gameService';
+import { OFFLINE } from './config';
 
 type Page = 'home' | 'game' | 'leaderboard' | 'profile';
 
@@ -18,13 +19,13 @@ function App() {
   useEffect(() => {
     // Fetch user on mount
     const token = localStorage.getItem('accessToken');
-    if (token && !user) {
+    if (!OFFLINE && token && !user) {
       useAuthStore.getState().fetchUser();
     }
   }, [user]);
 
   const handleGameEnd = async () => {
-    if (user && gameStatus !== 'playing') {
+    if (!OFFLINE && user && gameStatus !== 'playing') {
       try {
         const gameDuration = (gameState.gameEndTime - gameState.gameStartTime) / 1000;
         const playerWallsUsed = 10 - gameState.playerWallsLeft;
@@ -117,6 +118,7 @@ function App() {
               🎮 QUORIDOR
             </h1>
             <div className="flex gap-4">
+              {!OFFLINE && (<>
               <button
                 onClick={() => setCurrentPage('home')}
                 className={`px-4 py-2 rounded-lg font-semibold transition-all ${
@@ -149,6 +151,7 @@ function App() {
                   👤 프로필
                 </button>
               )}
+              </>)}
             </div>
           </div>
         </nav>

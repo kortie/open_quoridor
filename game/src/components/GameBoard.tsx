@@ -18,6 +18,8 @@ interface DragState {
   edgeType: 'horizontal' | 'vertical' | null; // which edge user started from
 }
 
+const boardSize = CELL_SIZE * 9;
+
 export const GameBoard: React.FC = () => {
   const gameState = useGameStore();
   const { playerPos, aiPos, validMoves, walls, currentTurn, gameStatus, playerWallsLeft } = gameState;
@@ -35,12 +37,21 @@ export const GameBoard: React.FC = () => {
   const [previewLine, setPreviewLine] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
-  const getCellFromCoords = (clientX: number, clientY: number): { row: number; col: number } | null => {
+  /**
+   * Board coordinates (SVG units, without the 10px frame) of a client point. The SVG
+   * is scaled down to fit narrow screens, so client pixels are not SVG units.
+   */
+  const toBoard = (clientX: number, clientY: number): { x: number; y: number } | null => {
     if (!svgRef.current) return null;
-
     const rect = svgRef.current.getBoundingClientRect();
-    const x = clientX - rect.left - 10;
-    const y = clientY - rect.top - 10;
+    const scale = (boardSize + 20) / rect.width;
+    return { x: (clientX - rect.left) * scale - 10, y: (clientY - rect.top) * scale - 10 };
+  };
+
+  const getCellFromCoords = (clientX: number, clientY: number): { row: number; col: number } | null => {
+    const p = toBoard(clientX, clientY);
+    if (!p) return null;
+    const { x, y } = p;
 
     const col = Math.floor(x / CELL_SIZE);
     const row = Math.floor(y / CELL_SIZE);
@@ -52,11 +63,9 @@ export const GameBoard: React.FC = () => {
   };
 
   const getEdgeType = (clientX: number, clientY: number): { type: 'piece' | 'wall' | null; edgeType?: 'horizontal' | 'vertical' } => {
-    if (!svgRef.current) return { type: null };
-
-    const rect = svgRef.current.getBoundingClientRect();
-    const x = clientX - rect.left - 10;
-    const y = clientY - rect.top - 10;
+    const p = toBoard(clientX, clientY);
+    if (!p) return { type: null };
+    const { x, y } = p;
 
     // Check if clicking on player piece
     const playerX = playerPos.col * CELL_SIZE + CELL_SIZE / 2;
@@ -86,10 +95,21 @@ export const GameBoard: React.FC = () => {
     return { type: null };
   };
 
-  const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+  const handleMouseDown = (e: React.PointerEvent<SVGSVGElement>) => {
     if (gameStatus !== 'playing' || currentTurn !== 'player') return;
+    // Keep receiving move/up events for this touch or mouse drag even outside the board.
+    e.currentTarget.setPointerCapture(e.pointerId);
 
     const edgeType = getEdgeType(e.clientX, e.clientY);
+
+    // Tapping a highlighted cell moves there directly (dragging the piece also works).
+    if (edgeType.type === null) {
+      const cell = getCellFromCoords(e.clientX, e.clientY);
+      if (cell && validMoves.some((m) => m.row === cell.row && m.col === cell.col)) {
+        gameState.playerMove(cell.row, cell.col);
+        return;
+      }
+    }
 
     if (edgeType.type === 'piece') {
       setDragState({
@@ -116,7 +136,7 @@ export const GameBoard: React.FC = () => {
     }
   };
 
-  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+  const handleMouseMove = (e: React.PointerEvent<SVGSVGElement>) => {
     if (!dragState.type) return;
 
     if (dragState.type === 'piece' && dragState.startPos) {
@@ -125,13 +145,14 @@ export const GameBoard: React.FC = () => {
         gameState.setHoverCell(cell);
       }
     } else if (dragState.type === 'wall') {
-      if (!svgRef.current) return;
-      const rect = svgRef.current.getBoundingClientRect();
-      const svgX = e.clientX - rect.left - 10;
-      const svgY = e.clientY - rect.top - 10;
+      const cur = toBoard(e.clientX, e.clientY);
+      const start = toBoard(dragState.startX, dragState.startY);
+      if (!cur || !start) return;
+      const svgX = cur.x;
+      const svgY = cur.y;
 
-      const dx = e.clientX - dragState.startX;
-      const dy = e.clientY - dragState.startY;
+      const dx = cur.x - start.x;
+      const dy = cur.y - start.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
 
       // Determine direction once threshold crossed
@@ -141,9 +162,8 @@ export const GameBoard: React.FC = () => {
       }
 
       // Show preview line that follows user's drag
-      const rect2 = svgRef.current.getBoundingClientRect();
-      const startSvgX = dragState.startX - rect2.left - 10;
-      const startSvgY = dragState.startY - rect2.top - 10;
+      const startSvgX = start.x;
+      const startSvgY = start.y;
 
       if (direction === 'horizontal') {
         // Draw horizontal line
@@ -195,7 +215,7 @@ export const GameBoard: React.FC = () => {
     }
   };
 
-  const handleMouseUp = (e: React.MouseEvent<SVGSVGElement>) => {
+  const handleMouseUp = (e: React.PointerEvent<SVGSVGElement>) => {
     if (dragState.type === 'piece' && dragState.startPos) {
       const cell = getCellFromCoords(e.clientX, e.clientY);
 
@@ -253,28 +273,27 @@ export const GameBoard: React.FC = () => {
     }
   };
 
-  const boardSize = CELL_SIZE * 9;
-
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-[#0f1419] via-[#1a1a2e] to-[#0f1419] p-4">
-      <div className="bg-[#1a1a2e] rounded-2xl p-8 border-4 border-[#06b6d4] shadow-2xl">
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-[#0f1419] via-[#1a1a2e] to-[#0f1419] p-2 sm:p-4">
+      <div className="bg-[#1a1a2e] rounded-2xl p-3 sm:p-8 border-4 border-[#06b6d4] shadow-2xl w-full max-w-[640px]">
         <h1 className="text-center text-3xl font-bold text-cyan-400 mb-2">🎮 쿼리도</h1>
         <p className="text-center text-gray-400 text-sm mb-6">
           👤 말을 드래그해 이동 | 🧱 보드 가장자리를 드래그해 벽 그리기
         </p>
 
         {/* Board */}
-        <div className="relative inline-block bg-[#0f1419] rounded-lg p-2 border-2 border-[#2a2a4e] mb-6">
+        <div className="relative block bg-[#0f1419] rounded-lg p-1 sm:p-2 border-2 border-[#2a2a4e] mb-6">
           <svg
             ref={svgRef}
-            width={boardSize + 20}
-            height={boardSize + 20}
-            className="bg-gradient-to-br from-[#1f2f4a] to-[#0f1419]"
-            style={{ borderRadius: '8px', userSelect: 'none' }}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={() => {
+            viewBox={`0 0 ${boardSize + 20} ${boardSize + 20}`}
+            className="bg-gradient-to-br from-[#1f2f4a] to-[#0f1419] block mx-auto"
+            // Scales down to the screen width; touch-action none stops the browser from
+            // turning a drag on the board into a page scroll.
+            style={{ width: '100%', maxWidth: boardSize + 20, height: 'auto', borderRadius: '8px', userSelect: 'none', touchAction: 'none' }}
+            onPointerDown={handleMouseDown}
+            onPointerMove={handleMouseMove}
+            onPointerUp={handleMouseUp}
+            onPointerCancel={() => {
               setDragState({
                 type: null,
                 startPos: null,

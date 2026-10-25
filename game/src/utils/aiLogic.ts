@@ -1,5 +1,6 @@
 import { GameState, Move, Position } from '../types';
 import { getValidMoves, getValidWallPositions } from './gameLogic';
+import { OFFLINE } from '../config';
 
 export function calculateDistance(from: Position, to: Position): number {
   return Math.abs(from.row - to.row) + Math.abs(from.col - to.col);
@@ -68,6 +69,24 @@ function getFallbackMove(state: GameState): Move | null {
   };
 }
 
+/** Offline (Android) build: same request shape, answered by the on-device engine. */
+async function getOfflineMove(state: GameState): Promise<Move | null> {
+  const validMoves = getValidMoves(state.aiPos, state.board, state.playerPos);
+  if (validMoves.length === 0) return null;
+  // Loaded on demand so the web build does not ship the engine.
+  const { getLocalAIMove } = await import('../engine/localAi');
+  return getLocalAIMove({
+    aiLevel: state.aiLevel,
+    aiPos: state.aiPos,
+    playerPos: state.playerPos,
+    aiWallsLeft: state.aiWallsLeft,
+    playerWallsLeft: state.playerWallsLeft,
+    walls: state.walls,
+    validMoves,
+    validWalls: getValidWallPositions(state.board, state.playerPos, state.aiPos, 'ai'),
+  });
+}
+
 export async function getAIMove(state: GameState): Promise<Move | null> {
-  return getEngineMove(state);
+  return OFFLINE ? getOfflineMove(state) : getEngineMove(state);
 }

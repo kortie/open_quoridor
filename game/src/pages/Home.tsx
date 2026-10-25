@@ -3,6 +3,7 @@ import { useGameStore } from '../store/gameStore';
 import { useAuthStore } from '../store/authStore';
 import { LoginButton } from '../components/LoginButton';
 import { initKakaoSDK } from '../services/kakaoAuth';
+import { OFFLINE } from '../config';
 
 interface HomeProps {
   onGameStart: () => void;
@@ -22,7 +23,7 @@ export const Home: React.FC<HomeProps> = ({ onGameStart }) => {
   const [selectedLevel, setSelectedLevel] = useState<string>('Normal');
 
   useEffect(() => {
-    initKakaoSDK();
+    if (!OFFLINE) initKakaoSDK();
   }, []);
 
   const handleStartGame = () => {
@@ -83,7 +84,7 @@ export const Home: React.FC<HomeProps> = ({ onGameStart }) => {
         </div>
 
         {/* Login Section */}
-        {!user && (
+        {!OFFLINE && !user && (
           <div className="bg-[#1a1a2e] border border-[#2a2a4e] rounded-lg p-6 text-center space-y-4">
             <p className="text-gray-400">로그인하여 기록을 저장하세요!</p>
             <LoginButton />

@@ -197,3 +197,17 @@ npm run dev
 
 **버전**: 1.0.0 (Phase 1)  
 **마지막 업데이트**: 2024년 7월
+
+## 오프라인 안드로이드 앱 (서버 없음)
+
+AI 엔진(`backend/src/ai`)을 앱에 넣어 기기에서 Web Worker로 돌립니다. 로그인, 리더보드, 기록 저장은 오프라인 빌드에서 숨겨집니다.
+
+```bash
+cd game
+npm run android:apk    # build:android → cap sync → gradlew assembleDebug
+# → android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+요구 사항: Node 18 이상(Capacitor 6), JDK 17, Android SDK(`ANDROID_HOME`). 처음 빌드할 때는 `android/local.properties`에 `sdk.dir=<SDK 경로>`가 필요합니다.
+엔진이 BigInt를 쓰므로 Android System WebView 67 이상이 필요합니다.
