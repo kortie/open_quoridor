@@ -8,7 +8,8 @@
     "start": "node dist/src/index.js",
     "test": "tsc && node dist/tests/ai.board.test.js && node dist/tests/ai.pathfind.test.js && node dist/tests/ai.eval.test.js && node dist/tests/ai.state.test.js && node dist/tests/ai.search.test.js",
     "selfplay": "tsc && node dist/tools/selfplay.js",
-    "regress": "tsc && node dist/tools/regress.js"
+    "regress": "tsc && node dist/tools/regress.js",
+    "gauntlet": "tsc && node dist/tools/gauntlet.js"
   },
   "dependencies": {
     "express": "^4.18.2",

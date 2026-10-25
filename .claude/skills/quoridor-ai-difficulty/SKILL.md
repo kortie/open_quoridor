@@ -22,6 +22,13 @@ description: Use when strengthening, tuning, or re-balancing the Quoridor AI eng
 | Hard는 완전 결정론적 → 같은 수순이 반복되어 사용자가 외워서 이길 수 있음 | selfplay 6판 모두 동일한 plies(62/81) |
 | 탐색이 Express 메인 스레드를 최대 2초 동안 막음 | `routes/game.ts` `/ai-move` |
 
+## 현재 결과 요약
+
+P0~P6을 구현했다. 게이트 결과와 A/B에서 배운 점은 design.md §8에 있다. 핵심만 적는다.
+- Expert vs Baseline 90%, VeryHard vs Baseline 90%.
+- Expert와 VeryHard의 간격(≥70%)은 미달이다(약 55~60%).
+- 강도를 가장 크게 올린 것은 벽 가치 스케일 `w2 = 6`이었다. 깊이와 탐색 기법은 효과가 작았다.
+
 ## 목표 난이도 사다리
 
 | UI 레벨 | 의도한 체감 | 핵심 설정 (상세는 design.md §4) |
@@ -51,16 +58,21 @@ description: Use when strengthening, tuning, or re-balancing the Quoridor AI eng
 
 ## 검증 게이트 (필수)
 
-selfplay는 첫 2~4 ply를 seed 기반 랜덤(상위 k개 중 선택)으로 두게 해야 한다. 그렇지 않으면 결정론적 엔진끼리 같은 판만 반복한다. 흑백은 번갈아 둔다.
+selfplay는 같은 랜덤 오프닝(기본 4 ply, depth 1 상위 3수 중 선택)으로 흑백을 바꿔 두 판씩 둔다. 이렇게 하지 않으면 결정론적 엔진끼리 같은 판만 반복한다.
 
 ```bash
 cd backend
-npm run selfplay -- <A> <B> <games> <seed>   # 예: VeryHard Baseline 40 1
+npm run regress -- 4 20                        # 고정 depth에서 베이스라인과 수 일치율 + nps (P1 게이트, 이후엔 참고용)
+npm run selfplay -- <A> <B> <games> <seed>     # 단일 프로세스, 판별 로그
+npm run gauntlet -- <A> <B> 40 12              # 병렬 프로세스로 집계 (12 jobs면 VeryHard vs Baseline 40판이 수 분)
+npm test                                       # 규칙 대조(ai.state) + 전술 국면(ai.search 6~10)
 ```
+
+gauntlet의 jobs는 코어 수보다 충분히 작게 둔다. 시간 제한 탐색이라 CPU 경합이 생기면 엔진이 약해져서 결과가 왜곡된다.
 
 | 검사 | 통과 기준 |
 |---|---|
-| 속도(P1 후) | 초기 국면 nps ≥ 베이스라인 × 5 (베이스라인 약 7k), 같은 depth에서 베이스라인과 같은 수 |
+| 속도(P1 후) | 초기 국면 nps ≥ 베이스라인 × 5 (베이스라인 약 7k, P1 결과 약 43k), 같은 depth에서 베이스라인과 같은 수 |
 | 강도 향상 | 새 `VeryHard` vs `Baseline`(기존 Hard) ≥ 80%, `Expert` vs `Baseline` ≥ 90% (40판 이상) |
 | 사다리 단조성 | 인접 레벨끼리 상위 레벨 승률 ≥ 70% (Easy<Normal<Hard<VeryHard<Expert) |
 | Easy 하한 | Easy vs Random ≥ 95% (Easy도 목표를 향해 간다) |
@@ -75,4 +87,17 @@ npm run selfplay -- <A> <B> <games> <seed>   # 예: VeryHard Baseline 40 1
 - 약한 레벨을 만들려고 엔진 코드를 분기/복제하지 않는다. 설정값만 쓴다.
 - Expert에 노이즈를 넣지 않는다. 대신 점수가 사실상 같은(δ 이내) 수 중에서만 랜덤으로 고른다.
 - 벽 합법성 규칙(`board.ts` `wallConflicts`, 경로 보존)을 속도 때문에 느슨하게 만들지 않는다. 프론트 `gameLogic.ts`와 결과가 달라지면 `toMove`가 null을 내고 fallback으로 빠진다.
-- `dist/`를 직접 고치지 않는다. 계측이 필요하면 `process.env` 플래그로 소스에 넣는다.
+- `dist/`를 직접 고치지 않는다. 계측이 필요하면 `searchBestMove`가 돌려주는 `{depth, nodes, elapsedMs, root}`를 쓴다.
+- 평가와 수 순서에 상대 폰을 고려한 거리(`wallsDistance(..., opCell)`)를 쓰지 않는다. 그 BFS는 멀리 있는 상대 폰도 제자리에서 점프할 수 있는 장애물로 보기 때문에, 깊이 1에서 전진과 옆걸음이 같은 점수가 된다. 평가에는 폰을 무시한 거리(`opp = -1`)를 쓰고, 벽 합법성에만 규칙대로 폰을 고려한 도달성을 쓴다.
+- `tools/baseline_ai/`는 고치지 않는다(`getBestMove`의 `overrides` 인자만 예외).
+
+## 구현 위치 (현재)
+
+| 파일 | 역할 |
+|---|---|
+| `src/ai/state.ts` | 탐색용 상태 `EState`(number 벽, 32비트 증분 Zobrist), 폰 수, 벽 합법성 |
+| `src/ai/pathfind.ts` | 행 마스크 BFS(`wallsDistance/wallsPath/wallsReachable/wallsCorridor`) + 기존 QState API |
+| `src/ai/eval.ts` | `evaluateState`(tempo, 오목한 벽 가치, 회랑 폭), `knownOutcome`(벽 소진 레이스 판정) |
+| `src/ai/search.ts` | PVS, typed-array TT, killer/history, 공격·방어 벽, quiescence, 시간 관리, `pickMove` 노이즈 |
+| `src/ai/config.ts` | 레벨별 `DifficultyConfig` — 난이도 조정은 여기서만 한다 |
+| `src/services/aiService.ts`, `aiWorker.ts` | worker_threads 탐색, 큐/타임아웃/fallback (tsx 개발 모드에서는 인라인) |

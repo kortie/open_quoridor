@@ -2,6 +2,9 @@
  * Compares the current engine against the frozen baseline at a fixed depth on a
  * set of reproducible positions, and reports search speed.
  *
+ * Move agreement was the acceptance check for the pure speed-up (P1). Since the
+ * search and evaluation changed on purpose, it is informational only.
+ *
  *   npm run regress -- [depth=3] [positions=20] [seed=7]
  */
 import { initBoard, applyMove, getMoves, getWinner } from '../src/ai/board.js';
@@ -54,7 +57,7 @@ function main() {
     const a = baselineBestMove(s, 'Hard', fixed);
     baseMs += Date.now() - t;
     t = Date.now();
-    const b = searchBestMove(s, 'Hard', fixed).move;
+    const b = searchBestMove(s, 'VeryHard', fixed).move;
     newMs += Date.now() - t;
     if (a === b) same++;
     else diffs.push(`#${i} baseline=${a} new=${b} state=${JSON.stringify(s, (_, v) => (typeof v === 'bigint' ? v.toString() : v))}`);
@@ -64,10 +67,9 @@ function main() {
   console.log(`time: baseline ${baseMs}ms, new ${newMs}ms (x${(baseMs / Math.max(newMs, 1)).toFixed(1)})`);
   for (const d of diffs) console.log('  ' + d);
 
-  const info = searchBestMove(initBoard(), 'Hard', { timeLimit: 2000, maxDepth: 64 });
+  const info = searchBestMove(initBoard(), 'VeryHard', { timeLimit: 2000, maxDepth: 64 });
   const nps = Math.round((info.nodes * 1000) / Math.max(info.elapsedMs, 1));
   console.log(`initial position, 2s: depth ${info.depth}, ${info.nodes} nodes, ${nps} nodes/s\n`);
-  if (same !== set.length) process.exitCode = 1;
 }
 
 main();

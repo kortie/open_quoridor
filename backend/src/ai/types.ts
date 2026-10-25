@@ -76,4 +76,6 @@ export interface EvalWeights {
   w2: number; // wall advantage weight
   w3: number; // mobility weight
   w4: number; // path diversity weight
+  w5?: number; // opponent path diversity weight
+  tempo?: number; // side-to-move bonus
 }

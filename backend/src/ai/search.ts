@@ -1,12 +1,14 @@
-import { QState, Action, DifficultyLevel, EvalWeights } from './types.js';
+import { QState, Action, DifficultyLevel } from './types.js';
 import { getMoves } from './board.js';
-import { evaluateState, WIN_THRESHOLD, LOSS_THRESHOLD } from './eval.js';
-import { wallsDistance, wallsPath, anchorSet, Walls } from './pathfind.js';
+import { evaluateState, knownOutcome, EvalOptions, WIN_THRESHOLD, KNOWN_WIN } from './eval.js';
+import { wallsDistance, wallsPath, wallsCorridor, FastPath, Walls } from './pathfind.js';
 import {
   EState,
   fromQState,
   applyAction,
   pawnMoves,
+  addWall,
+  wallConflicts,
   wallLegal,
   wallCutsPath,
   winnerOf,
@@ -14,194 +16,393 @@ import {
 } from './state.js';
 import { getDifficultyConfig, getEvalWeights, DifficultyConfig } from './config.js';
 
+const INF = 1e9;
+/** Null-window width; scores are fractional. */
+const NW = 0.01;
+/** Scores beyond this magnitude depend on ply and are stored ply-relative in the TT. */
+const DECIDED = KNOWN_WIN - 1000;
+const MAX_PLY = 128;
+
+// --- Transposition table ----------------------------------------------------------
+// One slot per index, generation-stamped so a new search never trusts entries written
+// under another difficulty's evaluation. Same-generation slots prefer deeper entries.
+
 const EXACT = 0;
 const LOWER = 1;
 const UPPER = 2;
-type Bound = typeof EXACT | typeof LOWER | typeof UPPER;
+const NO_MOVE = 255;
 
-interface TTEntry {
-  depth: number;
-  score: number;
-  bound: Bound;
-}
+const TT_BITS = 18;
+const TT_SIZE = 1 << TT_BITS;
+const TT_MASK = TT_SIZE - 1;
+const ttK0 = new Uint32Array(TT_SIZE);
+const ttK1 = new Uint32Array(TT_SIZE);
+const ttGen = new Uint16Array(TT_SIZE);
+const ttDepth = new Int8Array(TT_SIZE);
+const ttScore = new Float32Array(TT_SIZE);
+const ttBound = new Uint8Array(TT_SIZE);
+const ttMove = new Uint8Array(TT_SIZE);
+let generation = 0;
 
-class TranspositionTable {
-  private entries: Map<number, TTEntry> = new Map();
-  private readonly maxSize = 65536;
-
-  set(hash: number, depth: number, score: number, bound: Bound): void {
-    if (this.entries.size >= this.maxSize) {
-      this.entries.clear();
-    }
-    this.entries.set(hash, { depth, score, bound });
-  }
-
-  /** A stored cutoff score is only reusable when it still lies outside the current window. */
-  probe(hash: number, depth: number, alpha: number, beta: number): number | null {
-    const e = this.entries.get(hash);
-    if (!e || e.depth < depth) return null;
-    if (e.bound === EXACT) return e.score;
-    if (e.bound === LOWER && e.score >= beta) return e.score;
-    if (e.bound === UPPER && e.score <= alpha) return e.score;
-    return null;
+function nextGeneration(): void {
+  generation++;
+  if (generation > 0xffff) {
+    ttGen.fill(0);
+    generation = 1;
   }
 }
 
-interface SearchState {
-  tt: TranspositionTable;
-  rootPlayer: 0 | 1;
-  startTime: number;
-  timeLimit: number;
-  nodesEvaluated: number;
-  weights: EvalWeights;
+function ttIndex(s: EState): number {
+  const i = s.k0 & TT_MASK;
+  return ttGen[i] === generation && ttK0[i] === s.k0 && ttK1[i] === s.k1 ? i : -1;
+}
+
+function toTT(score: number, ply: number): number {
+  if (score >= DECIDED) return score + ply;
+  if (score <= -DECIDED) return score - ply;
+  return score;
+}
+
+function fromTT(score: number, ply: number): number {
+  if (score >= DECIDED) return score - ply;
+  if (score <= -DECIDED) return score + ply;
+  return score;
+}
+
+function ttStore(s: EState, depth: number, score: number, bound: number, move: Action, ply: number): void {
+  const i = s.k0 & TT_MASK;
+  if (ttGen[i] === generation && ttDepth[i] > depth && !(ttK0[i] === s.k0 && ttK1[i] === s.k1)) return;
+  ttK0[i] = s.k0;
+  ttK1[i] = s.k1;
+  ttGen[i] = generation;
+  ttDepth[i] = depth;
+  ttScore[i] = toTT(score, ply);
+  ttBound[i] = bound;
+  ttMove[i] = move < 0 ? NO_MOVE : move;
+}
+
+// --- Search context ---------------------------------------------------------------
+
+interface Ctx {
+  cfg: DifficultyConfig;
+  evalOpts: EvalOptions;
+  hardStop: number;
+  nodes: number;
   aborted: boolean;
+  killers: Int16Array; // [ply][2]
+  history: Int32Array; // [side][action]
+  strategic: Map<number, WallGain[]>;
 }
 
-const MAX_WALL_CANDIDATES = 20;
-
-function isTimeExceeded(s: SearchState): boolean {
-  return Date.now() - s.startTime > s.timeLimit;
+function timeUp(c: Ctx): boolean {
+  if ((c.nodes & 255) === 0 && Date.now() >= c.hardStop) c.aborted = true;
+  return c.aborted;
 }
 
-/** True if any wall anchor exists in the 3x3 neighbourhood of anchor (r,c). */
-function touchesExistingWall(w: Walls, r: number, c: number): boolean {
-  for (let dr = -1; dr <= 1; dr++) {
-    for (let dc = -1; dc <= 1; dc++) {
-      if (anchorSet(w, true, r + dr, c + dc) || anchorSet(w, false, r + dr, c + dc)) return true;
-    }
-  }
-  return false;
+function cellsOf(s: EState): { me: number; op: number; myGoal: number; opGoal: number } {
+  return s.turn === 0
+    ? { me: s.p0, op: s.p1, myGoal: 8, opGoal: 0 }
+    : { me: s.p1, op: s.p0, myGoal: 0, opGoal: 8 };
 }
 
-function distanceOf(s: EState, player: 0 | 1): number {
-  return player === 0 ? wallsDistance(s.w, s.p0, 8, s.p1) : wallsDistance(s.w, s.p1, 0, s.p0);
+interface NodePaths {
+  my: FastPath;
+  op: FastPath;
+  /** P1's and P2's paths, as wallLegal expects them. */
+  path0: number[];
+  path1: number[];
 }
-
-const pathMask = new Uint8Array(81);
 
 /**
- * Generate and order search moves: shortest-path pawn moves first, then walls
- * sorted by net gain in (D_op - D_me), then remaining pawn moves.
- *
- * A wall that leaves the opponent's current shortest path intact cannot raise
- * D_op, so such walls are dropped before any BFS. Survivors must also pass the
- * geometric prefilter (spec §2.4): touch the opponent's path, lie within
- * Chebyshev distance 2 of either pawn, or extend an existing wall.
+ * Shortest paths ignoring pawns, matching the evaluator. Wall legality uses the
+ * rules' pawn-aware reachability, so a path running through the other pawn is not
+ * trusted as a legality shortcut (an empty path forces the full BFS check).
  */
-function searchMoves(state: EState): Action[] {
-  const me = state.turn;
-  const op: 0 | 1 = me === 0 ? 1 : 0;
-  const meCell = me === 0 ? state.p0 : state.p1;
-  const opCell = me === 0 ? state.p1 : state.p0;
-  const myPath = wallsPath(state.w, meCell, me === 0 ? 8 : 0, opCell);
-  const opPath = wallsPath(state.w, opCell, op === 0 ? 8 : 0, meCell);
-  const dMe = myPath.distance;
-  const dOp = opPath.distance;
-  const path0 = me === 0 ? myPath.cells : opPath.cells;
-  const path1 = me === 0 ? opPath.cells : myPath.cells;
+function nodePaths(s: EState): NodePaths {
+  const k = cellsOf(s);
+  const my = wallsPath(s.w, k.me, k.myGoal, -1);
+  const op = wallsPath(s.w, k.op, k.opGoal, -1);
+  const myLegal = my.cells.includes(k.op) ? [] : my.cells;
+  const opLegal = op.cells.includes(k.me) ? [] : op.cells;
+  return s.turn === 0
+    ? { my, op, path0: myLegal, path1: opLegal }
+    : { my, op, path0: opLegal, path1: myLegal };
+}
 
-  const pathMoves: Action[] = [];
-  const otherPawn: Action[] = [];
-  for (const action of pawnMoves(state)) {
-    if (distanceOf(applyAction(state, action), me) < dMe) pathMoves.push(action);
-    else otherPawn.push(action);
+function moverWalls(s: EState): number {
+  return s.turn === 0 ? s.n0 : s.n1;
+}
+
+function evalNode(c: Ctx, s: EState, ply: number): number {
+  return evaluateState(s, pawnMoves(s).length, ply, c.evalOpts);
+}
+
+function terminal(s: EState, ply: number): number | null {
+  const winner = winnerOf(s);
+  if (winner === 0) return null;
+  return winner === s.turn + 1 ? WIN_THRESHOLD - ply : -(WIN_THRESHOLD - ply);
+}
+
+// --- Move generation --------------------------------------------------------------
+
+interface WallGain {
+  action: Action;
+  gain: number;
+}
+
+/**
+ * Walls for the side to move that lengthen the opponent's path, best net gain
+ * (ΔD_op − ΔD_me) first. Only walls cutting the opponent's current shortest path
+ * can lengthen it, so everything else is skipped before any BFS.
+ */
+function attackingWalls(s: EState, p: NodePaths, minGain: number, limit: number): WallGain[] {
+  const k = cellsOf(s);
+  const out: WallGain[] = [];
+  for (let action = 12; action < 140; action++) {
+    if (!wallCutsPath(action, p.op.cells)) continue;
+    if (!wallLegal(s, action, p.path0, p.path1)) continue;
+    const w = addWall(s.w, action);
+    const opGain = wallsDistance(w, k.op, k.opGoal, -1) - p.op.distance;
+    if (opGain < minGain) continue;
+    const myGain = wallCutsPath(action, p.my.cells) ? wallsDistance(w, k.me, k.myGoal, -1) - p.my.distance : 0;
+    out.push({ action, gain: opGain - myGain });
+  }
+  out.sort((a, b) => b.gain - a.gain);
+  return out.length > limit ? out.slice(0, limit) : out;
+}
+
+/**
+ * Largest increase in a player's distance that one more wall could cause. `path`
+ * must be a current shortest path for that player under `w`. Legality is only
+ * approximated (overlap rules, and the player must stay connected).
+ */
+function maxCut(w: Walls, start: number, goal: number, path: FastPath): number {
+  let best = 0;
+  for (let action = 12; action < 140; action++) {
+    if (!wallCutsPath(action, path.cells) || wallConflicts(w, action)) continue;
+    const d = wallsDistance(addWall(w, action), start, goal, -1);
+    if (d !== Infinity && d - path.distance > best) best = d - path.distance;
+  }
+  return best;
+}
+
+const myPathMask = new Uint8Array(81);
+const corridorMask = new Uint8Array(81);
+
+function touchesMask(mask: Uint8Array, action: Action): boolean {
+  const idx = (action - 12) & 63;
+  const r = idx >> 3;
+  const c = idx & 7;
+  return (mask[r * 9 + c] | mask[r * 9 + c + 1] | mask[(r + 1) * 9 + c] | mask[(r + 1) * 9 + c + 1]) !== 0;
+}
+
+/**
+ * Set-up walls: they do not lengthen the opponent's path yet, but make the best
+ * follow-up wall cut deeper than anything available now. Traps are built this way
+ * (a zero-gain wall, then one that costs three steps), and a generator that only
+ * offers immediate gains never sees them coming. Expensive; shallow plies only.
+ */
+function setupWalls(s: EState, p: NodePaths, limit: number, exclude: Set<Action>): WallGain[] {
+  if (moverWalls(s) < 2) return [];
+  const k = cellsOf(s);
+  const now = maxCut(s.w, k.op, k.opGoal, p.op);
+  wallsCorridor(s.w, k.op, k.opGoal, corridorMask);
+
+  const out: WallGain[] = [];
+  for (let action = 12; action < 140; action++) {
+    if (exclude.has(action) || wallCutsPath(action, p.op.cells) || !touchesMask(corridorMask, action)) continue;
+    if (wallCutsPath(action, p.my.cells)) continue;
+    if (!wallLegal(s, action, p.path0, p.path1)) continue;
+    // The opponent's path is untouched, so it is still a shortest path after the wall.
+    const next = maxCut(addWall(s.w, action), k.op, k.opGoal, p.op);
+    if (next >= 2 && next > now) out.push({ action, gain: next - now });
+  }
+  out.sort((a, b) => b.gain - a.gain);
+  return out.slice(0, limit);
+}
+
+/**
+ * Walls that leave the mover's distance unchanged but reduce the most damaging
+ * wall the opponent could place against them next turn. Root only: each candidate
+ * costs a scan of the opponent's replies.
+ */
+function defensiveWalls(s: EState, p: NodePaths, limit: number, exclude: Set<Action>): WallGain[] {
+  if (moverWalls(s) === 0 || (s.turn === 0 ? s.n1 : s.n0) === 0) return [];
+  const k = cellsOf(s);
+  const threat = maxCut(s.w, k.me, k.myGoal, p.my);
+  if (threat < 2) return [];
+
+  myPathMask.fill(0);
+  for (const cell of p.my.cells) myPathMask[cell] = 1;
+  const out: WallGain[] = [];
+  for (let action = 12; action < 140; action++) {
+    if (exclude.has(action) || wallCutsPath(action, p.my.cells) || !touchesMask(myPathMask, action)) continue;
+    if (!wallLegal(s, action, p.path0, p.path1)) continue;
+    const benefit = threat - maxCut(addWall(s.w, action), k.me, k.myGoal, p.my);
+    if (benefit >= 1) out.push({ action, gain: benefit });
+  }
+  out.sort((a, b) => b.gain - a.gain);
+  return out.slice(0, limit);
+}
+
+/** Set-up and defensive walls, cached per position since they are costly to find. */
+function strategicWalls(c: Ctx, s: EState, p: NodePaths, attacks: WallGain[]): WallGain[] {
+  const key = hashKey(s);
+  const cached = c.strategic.get(key);
+  if (cached) return cached;
+  const taken = new Set(attacks.map((w) => w.action));
+  const setup = c.cfg.setupWalls > 0 ? setupWalls(s, p, c.cfg.setupWalls, taken) : [];
+  for (const w of setup) taken.add(w.action);
+  const defence = c.cfg.defensiveWalls > 0 ? defensiveWalls(s, p, c.cfg.defensiveWalls, taken) : [];
+  const out = [...setup, ...defence];
+  c.strategic.set(key, out);
+  return out;
+}
+
+interface GenOptions {
+  ply: number;
+  ttMove: number;
+  walls: boolean;
+}
+
+function generate(c: Ctx, s: EState, p: NodePaths, o: GenOptions): Action[] {
+  const me = s.turn;
+  const k = cellsOf(s);
+  const scored: { action: Action; score: number }[] = [];
+  const hist = me * 140;
+
+  for (const action of pawnMoves(s)) {
+    const child = applyAction(s, action);
+    const d = wallsDistance(child.w, me === 0 ? child.p0 : child.p1, k.myGoal, -1);
+    let score: number;
+    if (d === 0) score = 2e9;
+    else if (d < p.my.distance) score = 1e8 + (p.my.distance - d) * 1e6;
+    else score = -1e8 + c.history[hist + action];
+    scored.push({ action, score });
   }
 
-  const walls: { action: Action; gain: number }[] = [];
-  const left = me === 0 ? state.n0 : state.n1;
-  if (left > 0) {
-    pathMask.fill(0);
-    for (const cell of opPath.cells) pathMask[cell] = 1;
-    const meR = (meCell / 9) | 0;
-    const meC = meCell - meR * 9;
-    const opR = (opCell / 9) | 0;
-    const opC = opCell - opR * 9;
+  if (o.walls && moverWalls(s) > 0) {
+    // Opening walls are rarely worth it unless they cost the opponent two or more steps.
+    const opening = s.n0 === 10 && s.n1 === 10 && p.op.distance >= 6;
+    const attacks = attackingWalls(s, p, opening ? c.cfg.openingWallMinGain : 1, c.cfg.wallCandidates);
+    for (const w of attacks) scored.push({ action: w.action, score: 1e7 + w.gain * 1e5 + c.history[hist + w.action] });
 
-    for (let action = 12; action < 140; action++) {
-      if (!wallCutsPath(action, opPath.cells)) continue;
-      const idx = (action - 12) & 63;
-      const r = idx >> 3;
-      const c = idx & 7;
-      const nearPawn =
-        (Math.abs(r - meR) <= 2 && Math.abs(c - meC) <= 2) ||
-        (Math.abs(r - opR) <= 2 && Math.abs(c - opC) <= 2);
-      const onPath =
-        pathMask[r * 9 + c] | pathMask[r * 9 + c + 1] | pathMask[(r + 1) * 9 + c] | pathMask[(r + 1) * 9 + c + 1];
-      if (!nearPawn && onPath === 0 && !touchesExistingWall(state.w, r, c)) continue;
-      if (!wallLegal(state, action, path0, path1)) continue;
-
-      const next = applyAction(state, action);
-      const opGain = distanceOf(next, op) - dOp;
-      if (opGain <= 0) continue;
-      const myGain = wallCutsPath(action, myPath.cells) ? distanceOf(next, me) - dMe : 0;
-      walls.push({ action, gain: opGain - myGain });
+    if (o.ply <= c.cfg.strategicPly && (c.cfg.setupWalls > 0 || c.cfg.defensiveWalls > 0)) {
+      for (const w of strategicWalls(c, s, p, attacks)) scored.push({ action: w.action, score: 5e6 + w.gain * 1e5 });
     }
-    walls.sort((a, b) => b.gain - a.gain);
   }
 
-  return [...pathMoves, ...walls.slice(0, MAX_WALL_CANDIDATES).map((w) => w.action), ...otherPawn];
-}
-
-/** Score from the root player's perspective. */
-function terminalScore(winner: 1 | 2, ply: number, s: SearchState): number {
-  const rootWon = winner === s.rootPlayer + 1;
-  return rootWon ? WIN_THRESHOLD - ply : LOSS_THRESHOLD + ply;
-}
-
-function leafScore(state: EState, ply: number, s: SearchState): number {
-  const score = evaluateState(state, pawnMoves(state).length, ply, s.weights);
-  return state.turn === s.rootPlayer ? score : -score;
-}
-
-function alphabeta(
-  state: EState,
-  depth: number,
-  ply: number,
-  alpha: number,
-  beta: number,
-  s: SearchState
-): number {
-  s.nodesEvaluated++;
-  if (isTimeExceeded(s)) s.aborted = true;
-  if (s.aborted) return 0;
-
-  const winner = winnerOf(state);
-  if (winner !== 0) return terminalScore(winner, ply, s);
-
-  const hash = hashKey(state);
-  const cached = s.tt.probe(hash, depth, alpha, beta);
-  if (cached !== null) return cached;
-
-  if (depth === 0) {
-    const score = leafScore(state, ply, s);
-    s.tt.set(hash, depth, score, EXACT);
-    return score;
+  const k0 = c.killers[o.ply * 2];
+  const k1 = c.killers[o.ply * 2 + 1];
+  for (const m of scored) {
+    if (m.action === o.ttMove) m.score = 3e9;
+    else if (m.score < 1e9 && m.action === k0) m.score = Math.max(m.score, 9e7);
+    else if (m.score < 1e9 && m.action === k1) m.score = Math.max(m.score, 8e7);
   }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((m) => m.action);
+}
 
-  const moves = searchMoves(state);
-  if (moves.length === 0) return 0;
+// --- Search -----------------------------------------------------------------------
+
+/** Leaf search over the side to move's strongest walls, with stand-pat. */
+function quiesce(c: Ctx, s: EState, ply: number, alpha: number, beta: number, q: number): number {
+  c.nodes++;
+  if (timeUp(c)) return 0;
+  const t = terminal(s, ply);
+  if (t !== null) return t;
+
+  const stand = evalNode(c, s, ply);
+  if (q <= 0 || Math.abs(stand) >= DECIDED || moverWalls(s) === 0 || ply >= MAX_PLY - 1) return stand;
+  if (stand >= beta) return stand;
+  if (stand > alpha) alpha = stand;
+
+  let best = stand;
+  for (const w of attackingWalls(s, nodePaths(s), 2, 3)) {
+    const score = -quiesce(c, applyAction(s, w.action), ply + 1, -beta, -alpha, q - 1);
+    if (c.aborted) return 0;
+    if (score > best) best = score;
+    if (score > alpha) alpha = score;
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+function search(c: Ctx, s: EState, depth: number, ply: number, alpha: number, beta: number, ext: number): number {
+  if (depth <= 0 || ply >= MAX_PLY - 1) return quiesce(c, s, ply, alpha, beta, c.cfg.quiescencePlies);
+
+  c.nodes++;
+  if (timeUp(c)) return 0;
+  const t = terminal(s, ply);
+  if (t !== null) return t;
 
   const alphaOrig = alpha;
-  const betaOrig = beta;
-  const maximizing = state.turn === s.rootPlayer;
-  let best = maximizing ? -Infinity : Infinity;
-
-  for (const move of moves) {
-    const score = alphabeta(applyAction(state, move), depth - 1, ply + 1, alpha, beta, s);
-    if (s.aborted) return 0;
-
-    if (maximizing) {
-      if (score > best) best = score;
-      if (best > alpha) alpha = best;
-    } else {
-      if (score < best) best = score;
-      if (best < beta) beta = best;
+  const ti = ttIndex(s);
+  let ttMv = -1;
+  if (ti >= 0) {
+    ttMv = ttMove[ti] === NO_MOVE ? -1 : ttMove[ti];
+    if (ttDepth[ti] >= depth) {
+      const score = fromTT(ttScore[ti], ply);
+      const bound = ttBound[ti];
+      if (bound === EXACT) return score;
+      if (bound === LOWER && score >= beta) return score;
+      if (bound === UPPER && score <= alpha) return score;
     }
-    if (beta <= alpha) break;
   }
 
-  const bound: Bound = best <= alphaOrig ? UPPER : best >= betaOrig ? LOWER : EXACT;
-  s.tt.set(hash, depth, best, bound);
+  const p = nodePaths(s);
+  if (c.cfg.endgameSolver) {
+    const known = knownOutcome(p.my.distance, p.op.distance, moverWalls(s), s.turn === 0 ? s.n1 : s.n0, ply);
+    if (known !== null) return known;
+  }
+
+  const moves = generate(c, s, p, { ply, ttMove: ttMv, walls: true });
+  if (moves.length === 0) return evalNode(c, s, ply);
+
+  // Without walls the mover only has a handful of pawn moves; look further for free.
+  const extend = ext > 0 && moverWalls(s) === 0;
+  const childDepth = extend ? depth : depth - 1;
+  const childExt = extend ? ext - 1 : ext;
+
+  let best = -INF;
+  let bestMove = moves[0];
+  for (let i = 0; i < moves.length; i++) {
+    const child = applyAction(s, moves[i]);
+    let score: number;
+    if (i === 0) {
+      score = -search(c, child, childDepth, ply + 1, -beta, -alpha, childExt);
+    } else {
+      // Late moves (after the well-ordered head of the list) get a reduced null-window
+      // probe first; only those that beat alpha are searched at full depth.
+      const reduce = c.cfg.lmr && depth >= 3 && i >= 4 && moves[i] !== c.killers[ply * 2] ? 1 : 0;
+      score = -search(c, child, childDepth - reduce, ply + 1, -alpha - NW, -alpha, childExt);
+      if (reduce && score > alpha && !c.aborted) {
+        score = -search(c, child, childDepth, ply + 1, -alpha - NW, -alpha, childExt);
+      }
+      if (score > alpha && score < beta && !c.aborted) {
+        score = -search(c, child, childDepth, ply + 1, -beta, -alpha, childExt);
+      }
+    }
+    if (c.aborted) return 0;
+
+    if (score > best) {
+      best = score;
+      bestMove = moves[i];
+    }
+    if (score > alpha) alpha = score;
+    if (alpha >= beta) {
+      const m = moves[i];
+      c.history[s.turn * 140 + m] += depth * depth;
+      if (c.killers[ply * 2] !== m) {
+        c.killers[ply * 2 + 1] = c.killers[ply * 2];
+        c.killers[ply * 2] = m;
+      }
+      break;
+    }
+  }
+
+  const bound = best <= alphaOrig ? UPPER : best >= beta ? LOWER : EXACT;
+  ttStore(s, depth, best, bound, bestMove, ply);
   return best;
 }
 
@@ -210,19 +411,49 @@ interface RootResult {
   score: number;
 }
 
-function searchRoot(state: EState, depth: number, moves: Action[], s: SearchState): RootResult[] | null {
+/**
+ * One root iteration. Moves after the first are tested against (best − margin), so
+ * every move within `margin` of the best gets an exact score; the rest only an
+ * upper bound. Returns the moves searched so far, best first, and whether all were.
+ */
+function searchRoot(
+  c: Ctx,
+  s: EState,
+  depth: number,
+  moves: Action[],
+  margin: number,
+  guess: number | null
+): { results: RootResult[]; complete: boolean } {
   const results: RootResult[] = [];
-  let alpha = -Infinity;
+  let best = -INF;
+  const extend = c.cfg.pawnOnlyExtensions > 0 && moverWalls(s) === 0;
+  const childDepth = extend ? depth : depth - 1;
+  const childExt = extend ? c.cfg.pawnOnlyExtensions - 1 : c.cfg.pawnOnlyExtensions;
 
-  for (const move of moves) {
-    const score = alphabeta(applyAction(state, move), depth - 1, 1, alpha, Infinity, s);
-    if (s.aborted) return null;
-    results.push({ move, score });
-    if (score > alpha) alpha = score;
+  for (let i = 0; i < moves.length; i++) {
+    const child = applyAction(s, moves[i]);
+    let score: number;
+    if (i === 0) {
+      if (guess !== null && depth >= 3 && Math.abs(guess) < DECIDED) {
+        const lo = guess - 15;
+        const hi = guess + 15;
+        score = -search(c, child, childDepth, 1, -hi, -lo, childExt);
+        if (!c.aborted && (score <= lo || score >= hi)) score = -search(c, child, childDepth, 1, -INF, INF, childExt);
+      } else {
+        score = -search(c, child, childDepth, 1, -INF, INF, childExt);
+      }
+    } else {
+      const bound = best - margin;
+      score = -search(c, child, childDepth, 1, -bound - NW, -bound, childExt);
+      if (score > bound && !c.aborted) score = -search(c, child, childDepth, 1, -INF, -bound, childExt);
+    }
+    if (c.aborted) break;
+    results.push({ move: moves[i], score });
+    if (score > best) best = score;
   }
 
   results.sort((a, b) => b.score - a.score);
-  return results;
+  return { results, complete: results.length === moves.length };
 }
 
 export interface SearchInfo {
@@ -231,54 +462,107 @@ export interface SearchInfo {
   depth: number;
   nodes: number;
   elapsedMs: number;
-  /** Root moves of the last completed iteration, best first. */
+  /** Root moves of the last iteration, best first (scores of weak moves are upper bounds). */
   root: RootResult[];
 }
 
-/** Iterative deepening alpha-beta with full diagnostics. `overrides` is for tools and tests. */
+function pickMove(results: RootResult[], cfg: DifficultyConfig, rng: () => number): Action {
+  const best = results[0];
+  if (!cfg.allowRandomization || Math.abs(best.score) >= DECIDED) return best.move;
+
+  if (cfg.softmaxT > 0) {
+    const weights = results.map((r) => Math.exp((r.score - best.score) / cfg.softmaxT));
+    let x = rng() * weights.reduce((a, b) => a + b, 0);
+    for (let i = 0; i < results.length; i++) {
+      x -= weights[i];
+      if (x <= 0) return results[i].move;
+    }
+    return best.move;
+  }
+  if (cfg.tieDelta > 0) {
+    const near = results.filter((r) => r.score >= best.score - cfg.tieDelta);
+    return near[Math.floor(rng() * near.length)].move;
+  }
+  return best.move;
+}
+
+/** Iterative deepening PVS with full diagnostics. `overrides` is for tools and tests. */
 export function searchBestMove(
   state: QState,
   difficulty: DifficultyLevel,
-  overrides: Partial<DifficultyConfig> = {}
+  overrides: Partial<DifficultyConfig> = {},
+  rng: () => number = Math.random
 ): SearchInfo {
-  const config = { ...getDifficultyConfig(difficulty), ...overrides };
-  const root = fromQState(state);
-  const s: SearchState = {
-    tt: new TranspositionTable(),
-    rootPlayer: root.turn,
-    startTime: Date.now(),
-    timeLimit: config.timeLimit,
-    nodesEvaluated: 0,
-    weights: getEvalWeights(difficulty),
+  const cfg: DifficultyConfig = { ...getDifficultyConfig(difficulty), ...overrides };
+  const start = Date.now();
+  nextGeneration();
+  const c: Ctx = {
+    cfg,
+    evalOpts: {
+      weights: { ...getEvalWeights(difficulty), ...cfg.evalWeights },
+      features: cfg.evalFeatures,
+      endgame: cfg.endgameSolver,
+    },
+    hardStop: start + cfg.timeLimit,
+    nodes: 0,
     aborted: false,
+    killers: new Int16Array(MAX_PLY * 2).fill(-1),
+    history: new Int32Array(2 * 140),
+    strategic: new Map(),
   };
+  const done = (move: Action, depth: number, root: RootResult[]): SearchInfo => ({
+    move,
+    depth,
+    nodes: c.nodes,
+    elapsedMs: Date.now() - start,
+    root,
+  });
 
-  const ordered = searchMoves(root);
-  if (ordered.length === 0) {
+  const root = fromQState(state);
+  const p = nodePaths(root);
+  const useWalls = cfg.wallUseProb >= 1 || rng() < cfg.wallUseProb;
+  let moves = generate(c, root, p, { ply: 0, ttMove: -1, walls: useWalls });
+  if (moves.length === 0) {
     const legal = getMoves(state);
-    const move = legal.length > 0 ? legal[0] : 0;
-    return { move, depth: 0, nodes: 0, elapsedMs: 0, root: [] };
+    return done(legal.length > 0 ? legal[0] : 0, 0, []);
   }
+  // An immediate win is always taken, at every level.
+  for (const m of moves) {
+    if (m < 12 && winnerOf(applyAction(root, m)) !== 0) return done(m, 0, [{ move: m, score: WIN_THRESHOLD }]);
+  }
+  if (moves.length === 1) return done(moves[0], 0, [{ move: moves[0], score: 0 }]);
 
-  let best: RootResult[] = ordered.map((move) => ({ move, score: 0 }));
+  const margin = !cfg.allowRandomization ? 0 : cfg.softmaxT > 0 ? 4 * cfg.softmaxT : cfg.tieDelta;
+  let results: RootResult[] = moves.map((move) => ({ move, score: 0 }));
   let completed = 0;
+  let bestChanged = false;
 
-  for (let depth = 1; depth <= config.maxDepth; depth++) {
-    const results = searchRoot(root, depth, ordered, s);
-    if (results === null) break;
-    best = results;
+  for (let depth = 1; depth <= cfg.maxDepth; depth++) {
+    // The next iteration usually costs several times the last one; do not start it late.
+    const elapsed = Date.now() - start;
+    const startBudget = cfg.timeLimit * Math.min(0.9, cfg.iterationStart * (cfg.timeExtension && bestChanged ? 1.5 : 1));
+    if (depth > 1 && elapsed > startBudget) break;
+
+    const guess = completed > 0 ? results[0].score : null;
+    const r = searchRoot(c, root, depth, moves, margin, guess);
+    if (!r.complete) {
+      // The first root move is the previous best, searched first; whatever leads the partial
+      // iteration has been compared against it at the new depth and can be trusted.
+      if (r.results.length > 0) {
+        const seen = new Set(r.results.map((x) => x.move));
+        results = [...r.results, ...results.filter((x) => !seen.has(x.move))];
+      }
+      break;
+    }
+
+    bestChanged = completed > 0 && r.results[0].move !== results[0].move;
+    results = r.results;
     completed = depth;
-    if (best[0].score >= WIN_THRESHOLD - config.maxDepth) break;
-    if (isTimeExceeded(s)) break;
+    moves = results.map((x) => x.move);
+    if (Math.abs(results[0].score) >= DECIDED) break;
   }
 
-  let move = best[0].move;
-  if (config.allowRandomization && Math.random() < 0.3) {
-    const top = best.slice(0, Math.min(3, best.length));
-    move = top[Math.floor(Math.random() * top.length)].move;
-  }
-
-  return { move, depth: completed, nodes: s.nodesEvaluated, elapsedMs: Date.now() - s.startTime, root: best };
+  return done(pickMove(results, cfg, rng), completed, results);
 }
 
 /**

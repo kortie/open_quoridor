@@ -3,7 +3,10 @@
  *
  *   npm run selfplay -- <A> <B> [games=20] [seed=1] [openingPlies=4]
  *
- * Players: Easy | Normal | Hard | VeryHard | Expert | Baseline | Random.
+ * Players: Easy | Normal | Hard | VeryHard | Expert | Baseline | Random, optionally
+ * followed by `:` and a JSON object of DifficultyConfig overrides, for A/B tests:
+ *   'VeryHard:{"setupWalls":0}'  'Baseline:{"timeLimit":500}'
+ *   'VeryHard:{"evalWeights":{"tempo":0}}'
  * Baseline is the frozen pre-improvement engine (tools/baseline_ai) at Hard.
  * Games are played in pairs: both games of a pair share the same random opening
  * and swap colours, so deterministic engines still produce distinct games.
@@ -12,8 +15,10 @@ import { initBoard, applyMove, getMoves, getWinner } from '../src/ai/board.js';
 import { searchBestMove } from '../src/ai/search.js';
 import { getBestMove as baselineBestMove } from './baseline_ai/search.js';
 import { Action, DifficultyLevel, DIFFICULTY_LEVELS, QState } from '../src/ai/types.js';
+import { DifficultyConfig } from '../src/ai/config.js';
 
-type Player = DifficultyLevel | 'Baseline' | 'Random';
+type Kind = DifficultyLevel | 'Baseline' | 'Random';
+interface Player { name: string; kind: Kind; overrides: Partial<DifficultyConfig>; }
 const PLY_CAP = 300;
 
 function makeRng(seed: number) {
@@ -32,12 +37,12 @@ interface GameResult { winner: 0 | 1 | 2; plies: number; p1: SideStats; p2: Side
 const newStats = (): SideStats => ({ moves: 0, totalMs: 0, maxMs: 0, depthSum: 0, searched: 0 });
 
 function pickMove(state: QState, player: Player, rng: () => number, stats: SideStats): Action {
-  if (player === 'Random') {
+  if (player.kind === 'Random') {
     const moves = getMoves(state);
     return moves[Math.floor(rng() * moves.length)];
   }
-  if (player === 'Baseline') return baselineBestMove(state, 'Hard');
-  const info = searchBestMove(state, player);
+  if (player.kind === 'Baseline') return baselineBestMove(state, 'Hard', player.overrides);
+  const info = searchBestMove(state, player.kind, player.overrides);
   stats.depthSum += info.depth;
   stats.searched++;
   return info.move;
@@ -83,18 +88,22 @@ function playGame(p1: Player, p2: Player, opening: Action[], rng: () => number):
   return { winner: getWinner(state), plies: PLY_CAP, p1: stats[0], p2: stats[1] };
 }
 
-function parsePlayer(arg: string | undefined, fallback: Player): Player {
-  if (!arg) return fallback;
-  if ((DIFFICULTY_LEVELS as readonly string[]).includes(arg) || arg === 'Baseline' || arg === 'Random') {
-    return arg as Player;
+function parsePlayer(arg: string | undefined, fallback: Kind): Player {
+  const spec = arg ?? fallback;
+  const colon = spec.indexOf(':');
+  const kind = colon < 0 ? spec : spec.slice(0, colon);
+  const overrides = colon < 0 ? {} : (JSON.parse(spec.slice(colon + 1)) as Partial<DifficultyConfig>);
+  if ((DIFFICULTY_LEVELS as readonly string[]).includes(kind) || kind === 'Baseline' || kind === 'Random') {
+    return { name: spec, kind: kind as Kind, overrides };
   }
-  throw new Error(`Unknown player "${arg}" (expected ${DIFFICULTY_LEVELS.join('|')}|Baseline|Random)`);
+  throw new Error(`Unknown player "${kind}" (expected ${DIFFICULTY_LEVELS.join('|')}|Baseline|Random)`);
 }
 
 function main() {
   const [aArg, bArg, gamesArg, seedArg, openArg] = process.argv.slice(2);
-  const A = parsePlayer(aArg, 'Easy');
-  const B = parsePlayer(bArg, 'Hard');
+  const pa = parsePlayer(aArg, 'Easy');
+  const pb = parsePlayer(bArg, 'Hard');
+  const [A, B] = [pa.name, pb.name];
   const games = parseInt(gamesArg ?? '20', 10);
   const rng = makeRng(parseInt(seedArg ?? '1', 10));
   const openingPlies = parseInt(openArg ?? '4', 10);
@@ -109,7 +118,7 @@ function main() {
   for (let g = 0; g < games; g++) {
     if (g % 2 === 0) opening = makeOpening(openingPlies, rng);
     const aIsP1 = g % 2 === 0;
-    const r = aIsP1 ? playGame(A, B, opening, rng) : playGame(B, A, opening, rng);
+    const r = aIsP1 ? playGame(pa, pb, opening, rng) : playGame(pb, pa, opening, rng);
     const aStats = aIsP1 ? r.p1 : r.p2;
     const bStats = aIsP1 ? r.p2 : r.p1;
 

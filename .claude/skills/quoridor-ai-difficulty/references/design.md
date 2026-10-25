@@ -93,19 +93,22 @@ score = w1 * (D_op − D_me)
 
 `types.ts`의 `DifficultyLevel = 'Easy' | 'Normal' | 'Hard' | 'VeryHard' | 'Expert'`. `DifficultyConfig`를 확장한다.
 
+현재 값(`config.ts`, selfplay로 맞춘 값):
+
 | 필드 | Easy | Normal | Hard | VeryHard | Expert |
 |---|---|---|---|---|---|
-| maxDepth | 1 | 2 | 4 | 64 | 64 |
-| timeLimit (ms) | 150 | 300 | 800 | 1500 | 3000 |
-| softmaxT (eval 단위) | 12 | 5 | 1.5 | 0 | 0 |
+| maxDepth | 1 | 2 | 2 | 64 | 64 |
+| timeLimit (ms) | 150 | 300 | 500 | 1500 | 3000 |
+| softmaxT (eval 단위) | 15 | 6 | 2 | 0 | 0 |
 | tieDelta (동점 랜덤 폭) | – | – | – | 0.5 | 0.5 |
-| wallCandidates | 6 | 10 | 16 | 20 | 24 |
-| defensiveWalls | 0 | 0 | 0 | 4 | 4 |
-| wallUseProb (벽 수 고려 확률) | 0.4 | 0.8 | 1 | 1 | 1 |
-| quiescencePlies | 0 | 0 | 0 | 1 | 2 |
+| wallCandidates | 6 | 10 | 10 | 20 | 10 |
+| setup/defensive 벽 (루트만) | – | – | – | – | 8 / 4 |
+| wallUseProb | 0.4 | 0.8 | 1 | 1 | 1 |
+| quiescencePlies | 0 | 0 | 0 | 1 | 1 |
+| pawnOnlyExtensions | 0 | 0 | 0 | 2 | 4 |
 | endgameSolver | ✗ | ✗ | ✓ | ✓ | ✓ |
 | timeExtension | ✗ | ✗ | ✗ | ✓ | ✓ |
-| evalFeatures | 거리+벽 | 전체 | 전체 | 전체 | 전체 |
+| evalFeatures | basic | full | full | full | full |
 
 - **softmax 노이즈**: 루트 결과 `s_i`에 대해 `p_i ∝ exp((s_i − s_max) / T)`로 뽑는다. 지금의 "30% 확률로 상위 3개 중 균등 선택"보다 자연스럽다. 큰 실수는 드물고, 비슷한 수 사이에서만 흔들린다. T=12면 대략 1칸 손해 수도 고르는 수준이다.
 - **모든 레벨 공통**: 즉시 이기는 수가 있으면 노이즈 없이 그 수를 둔다. Easy가 결승선 앞에서 옆으로 가면 버그처럼 보인다.
@@ -151,3 +154,29 @@ score = w1 * (D_op − D_me)
 2. 양쪽 벽이 0개이고 내가 레이스에서 이길 때: 최단경로로 전진한다.
 3. 초기 국면 6 ply 동안 VeryHard가 쓴 벽은 1개 이하다.
 4. 상대가 다음 수에 gain ≥ 3짜리 벽을 둘 수 있을 때: Expert가 방어 수를 두거나 레이스 우위를 유지한다.
+
+---
+
+## §8 실측 결과와 교훈 (2026-10, 브랜치 ai-difficulty)
+
+게이트(실제 시간 제한, 40판):
+
+| 대국 | 결과 |
+|---|---|
+| Expert vs Baseline | 90.0% (36-2, 2무) |
+| VeryHard vs Baseline | 90.0% (36-3, 1무) |
+| Expert vs VeryHard(깊이 3 제한판) | 62.5% — 제한 없는 VeryHard 상대로는 축소 시간 실험에서 약 53~57% |
+| VeryHard vs Hard / Hard vs Normal / Normal vs Easy / Easy vs Random | 82.5% / 71.7% / 95.0% / 100% |
+
+A/B로 확인한 사실(VH 400ms vs Baseline 500ms 또는 기준 엔진과의 직접 대결, 60~100판):
+- **벽 가치 스케일(w2)이 가장 큰 레버였다.** 1 → 57%, 2 → 80%, 4 → 82%, 6 → 93%, 8 → 80%, 11 → 83%, 15 → 67%. 벽을 싸게 보면 초반에 벽을 다 써버리고 후반 함정에 당한다.
+- 벽 후보는 적은 편이 낫다. 40개 → 32%(기준 20개 대비), 10개 → 54%. 깊이를 잃는 비용이 더 크다.
+- 깊이는 3~4를 넘으면 거의 영향이 없다. 시간 2배 → 53~57%, LMR → 52%(깊이 +0.5).
+- 준비 벽(setup)을 ply ≤ 1에 넣으면 손해(45%)이고 루트에만 넣으면 소폭 이득(62%)이다. 비용 때문에 깊이를 2수 잃는다.
+- tempo(2, 9), 이동성(0), 회랑 폭(0)을 바꾸면 모두 소폭 손해였다. 기본값 근처가 국소 최적이다.
+- 새 반복 시작 비율: 0.25 → 40%, 0.6 → 55%. 남은 시간을 쓰는 쪽이 낫다.
+
+미달 항목: VeryHard→Expert 간격(≥70%)은 맞추지 못했다. 다음 후보:
+(1) 평가함수 자동 튜닝(§6 SPSA) — 가장 효과가 컸던 것이 평가 가중치였다.
+(2) 벽 전쟁의 장기 효과를 보는 평가 항(남은 벽으로 만들 수 있는 최대 지연 = 양쪽 `maxCut` 차이)을 리프에 넣되, 비용을 줄이려고 점수 차가 작을 때만 계산한다.
+(3) 두 기준이 충돌하면 VeryHard의 Baseline 기준(≥80%)을 우선한다.
