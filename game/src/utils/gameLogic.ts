@@ -54,6 +54,17 @@ export function isWallBlocking(
   return false;
 }
 
+function inBounds(row: number, col: number): boolean {
+  return row >= 0 && row <= 8 && col >= 0 && col <= 8;
+}
+
+/**
+ * Pawn moves per the official rules (same as the AI engine's board.ts):
+ * - one step orthogonally unless a wall is in the way;
+ * - onto the opponent: jump straight over it, provided no wall stands behind it;
+ * - if that straight jump is blocked by a wall or the board edge, step diagonally
+ *   to either side of the opponent instead (unless a wall blocks that side).
+ */
 export function getValidMoves(
   pos: Position,
   board: Cell[][],
@@ -68,23 +79,27 @@ export function getValidMoves(
   ];
 
   for (const { dr, dc } of directions) {
-    const newRow = pos.row + dr;
-    const newCol = pos.col + dc;
+    const next = { row: pos.row + dr, col: pos.col + dc };
+    if (!inBounds(next.row, next.col)) continue;
+    if (isWallBlocking(pos, next, board)) continue;
 
-    if (newRow < 0 || newRow > 8 || newCol < 0 || newCol > 8) continue;
-    if (isWallBlocking(pos, { row: newRow, col: newCol }, board)) continue;
+    if (next.row !== opponentPos.row || next.col !== opponentPos.col) {
+      valid.push(next);
+      continue;
+    }
 
-    if (newRow === opponentPos.row && newCol === opponentPos.col) {
-      const jumpRow = newRow + dr;
-      const jumpCol = newCol + dc;
+    const jump = { row: next.row + dr, col: next.col + dc };
+    if (inBounds(jump.row, jump.col) && !isWallBlocking(next, jump, board)) {
+      valid.push(jump);
+      continue;
+    }
 
-      if (jumpRow >= 0 && jumpRow <= 8 && jumpCol >= 0 && jumpCol <= 8) {
-        if (!isWallBlocking({ row: newRow, col: newCol }, { row: jumpRow, col: jumpCol }, board)) {
-          valid.push({ row: jumpRow, col: jumpCol });
-        }
-      }
-    } else {
-      valid.push({ row: newRow, col: newCol });
+    // Straight jump blocked: the two cells beside the opponent, perpendicular to the move.
+    const sides = dr !== 0 ? [{ dr: 0, dc: -1 }, { dr: 0, dc: 1 }] : [{ dr: -1, dc: 0 }, { dr: 1, dc: 0 }];
+    for (const side of sides) {
+      const diag = { row: next.row + side.dr, col: next.col + side.dc };
+      if (!inBounds(diag.row, diag.col) || isWallBlocking(next, diag, board)) continue;
+      if (!valid.some((m) => m.row === diag.row && m.col === diag.col)) valid.push(diag);
     }
   }
 
@@ -160,63 +175,53 @@ export function canReachGoal(
   return false;
 }
 
+/**
+ * `walls` are the walls already on the board. They are needed for the crossing rule: a
+ * horizontal and a vertical wall may not share the same centre point, and the per-cell
+ * flags cannot tell one wall there from two walls meeting end to end.
+ */
 export function isValidWallPlacement(
   wall: Wall,
   board: Cell[][],
   playerPos: Position,
-  aiPos: Position
+  aiPos: Position,
+  walls: Wall[]
 ): boolean {
-  // Check bounds
-  if (wall.row < 0 || wall.col < 0) {
-    return false;
-  }
+  if (wall.row < 0 || wall.col < 0 || wall.row >= 8 || wall.col >= 8) return false;
 
+  // Overlap with a wall of the same orientation (fully or by half).
   if (wall.direction === 'horizontal') {
-    if (wall.row >= 8 || wall.col >= 8) return false;
-    // Check if wall already exists
     if (board[wall.row][wall.col].walls.bottom) return false;
-    if (wall.col + 1 <= 8 && board[wall.row][wall.col + 1].walls.bottom) return false;
+    if (board[wall.row][wall.col + 1].walls.bottom) return false;
   } else {
-    if (wall.col >= 8 || wall.row >= 8) return false;
-    // Check if wall already exists
     if (board[wall.row][wall.col].walls.right) return false;
-    if (wall.row + 1 <= 8 && board[wall.row + 1][wall.col].walls.right) return false;
+    if (board[wall.row + 1][wall.col].walls.right) return false;
   }
+  if (walls.some((w) => w.row === wall.row && w.col === wall.col && w.direction !== wall.direction)) return false;
 
-  // Create test board
-  const testBoard = JSON.parse(JSON.stringify(board));
+  // Both players must still be able to reach their goal row.
+  const testBoard: Cell[][] = JSON.parse(JSON.stringify(board));
   applyWallToBoard(testBoard, wall);
-
-  // Check if opponent can still reach goal
-  const targetRow = wall.placedBy === 'player' ? 0 : 8;
-  const opponentPos = wall.placedBy === 'player' ? aiPos : playerPos;
-
-  return canReachGoal(testBoard, opponentPos, targetRow);
+  return canReachGoal(testBoard, playerPos, 8) && canReachGoal(testBoard, aiPos, 0);
 }
 
 export function getValidWallPositions(
   board: Cell[][],
   playerPos: Position,
   aiPos: Position,
-  placedBy: 'player' | 'ai'
+  placedBy: 'player' | 'ai',
+  walls: Wall[]
 ): Wall[] {
-  const walls: Wall[] = [];
+  const valid: Wall[] = [];
 
-  for (let row = 0; row < 9; row++) {
-    for (let col = 0; col < 9; col++) {
-      // Horizontal walls
-      const hWall: Wall = { row, col, direction: 'horizontal', placedBy };
-      if (isValidWallPlacement(hWall, board, playerPos, aiPos)) {
-        walls.push(hWall);
-      }
-
-      // Vertical walls
-      const vWall: Wall = { row, col, direction: 'vertical', placedBy };
-      if (isValidWallPlacement(vWall, board, playerPos, aiPos)) {
-        walls.push(vWall);
+  for (let row = 0; row < 8; row++) {
+    for (let col = 0; col < 8; col++) {
+      for (const direction of ['horizontal', 'vertical'] as const) {
+        const wall: Wall = { row, col, direction, placedBy };
+        if (isValidWallPlacement(wall, board, playerPos, aiPos, walls)) valid.push(wall);
       }
     }
   }
 
-  return walls;
+  return valid;
 }

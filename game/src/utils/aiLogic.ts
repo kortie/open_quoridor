@@ -12,7 +12,7 @@ const AI_REQUEST_TIMEOUT_MS = 10000;
 async function getEngineMove(state: GameState): Promise<Move | null> {
   try {
     const validMoves = getValidMoves(state.aiPos, state.board, state.playerPos);
-    const validWalls = getValidWallPositions(state.board, state.playerPos, state.aiPos, 'ai');
+    const validWalls = getValidWallPositions(state.board, state.playerPos, state.aiPos, 'ai', state.walls);
 
     if (validMoves.length === 0) return null;
 
@@ -83,7 +83,7 @@ async function getOfflineMove(state: GameState): Promise<Move | null> {
     playerWallsLeft: state.playerWallsLeft,
     walls: state.walls,
     validMoves,
-    validWalls: getValidWallPositions(state.board, state.playerPos, state.aiPos, 'ai'),
+    validWalls: getValidWallPositions(state.board, state.playerPos, state.aiPos, 'ai', state.walls),
   });
 }
 
