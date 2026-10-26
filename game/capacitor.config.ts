@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.knoxmatrix.quoridor',
+  appId: 'juanstudio.wallgame',
   appName: 'Quoridor',
   webDir: 'dist',
   android: {

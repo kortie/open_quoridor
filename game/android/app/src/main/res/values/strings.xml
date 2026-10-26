@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">Quoridor</string>
     <string name="title_activity_main">Quoridor</string>
-    <string name="package_name">com.knoxmatrix.quoridor</string>
-    <string name="custom_url_scheme">com.knoxmatrix.quoridor</string>
+    <string name="package_name">juanstudio.wallgame</string>
+    <string name="custom_url_scheme">juanstudio.wallgame</string>
 </resources>

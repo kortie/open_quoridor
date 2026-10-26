@@ -1,11 +1,27 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useGameStore } from '../store/gameStore';
 import { Wall } from '../types';
 
 const CELL_SIZE = 60;
-const WALL_THICKNESS = 8;
+const WALL_THICKNESS = 9;
 const EDGE_THRESHOLD = 15;
 const DIRECTION_THRESHOLD = CELL_SIZE * 2; // Must drag 2 cells to determine direction
+/** Pointer travel (board units) below which a press on a wall edge counts as a tap. */
+const TAP_SLOP = 12;
+const boardSize = CELL_SIZE * 9;
+const VIEW = boardSize + 20;
+
+const PLAYER = '#5eead4';
+const AI = '#f9a8d4';
+const PREVIEW = '#fde68a';
+
+const LEVEL_LABEL: Record<string, string> = {
+  Easy: '🌱 쉬움',
+  Normal: '🍀 보통',
+  Hard: '🔥 어려움',
+  VeryHard: '⚡ 매우 어려움',
+  Expert: '👑 전문가',
+};
 
 interface DragState {
   type: 'piece' | 'wall' | null;
@@ -18,48 +34,125 @@ interface DragState {
   edgeType: 'horizontal' | 'vertical' | null; // which edge user started from
 }
 
-const boardSize = CELL_SIZE * 9;
+const NO_DRAG: DragState = {
+  type: null,
+  startPos: null,
+  startX: 0,
+  startY: 0,
+  currentX: 0,
+  currentY: 0,
+  direction: null,
+  edgeType: null,
+};
 
-export const GameBoard: React.FC = () => {
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+/** Elapsed game time, frozen once the game has ended. */
+const ElapsedTime: React.FC<{ start: number; end: number }> = ({ start, end }) => {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (end) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [end]);
+  return <>{formatElapsed((end || now) - start)}</>;
+};
+
+/** Largest square that fits the element, kept up to date as the viewport changes. */
+function useSquareFit(ref: React.RefObject<HTMLElement>): number {
+  const [size, setSize] = useState(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setSize(Math.floor(Math.min(el.clientWidth, el.clientHeight)));
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return size;
+}
+
+interface PawnProps {
+  row: number;
+  col: number;
+  color: string;
+  dim?: boolean;
+  face: 'player' | 'ai';
+}
+
+const Pawn: React.FC<PawnProps> = ({ row, col, color, dim, face }) => (
+  <g transform={`translate(${col * CELL_SIZE + CELL_SIZE / 2 + 10}, ${row * CELL_SIZE + CELL_SIZE / 2 + 10})`}>
+    <g className="pawn-float" style={{ opacity: dim ? 0.6 : 1 }}>
+      <ellipse cx="0" cy="21" rx="15" ry="4" fill="#000" opacity="0.35" />
+      <circle cx="0" cy="0" r="21" fill={color} filter="url(#glow)" />
+      <circle cx="-7" cy="-9" r="5" fill="#fff" opacity="0.45" />
+      {/* eyes */}
+      <circle cx="-7" cy="-2" r="3" fill="#1e1b3a" />
+      <circle cx="7" cy="-2" r="3" fill="#1e1b3a" />
+      <circle cx="-6" cy="-3" r="1" fill="#fff" />
+      <circle cx="8" cy="-3" r="1" fill="#fff" />
+      {/* blush */}
+      <ellipse cx="-12" cy="5" rx="3.5" ry="2" fill="#fb7185" opacity="0.55" />
+      <ellipse cx="12" cy="5" rx="3.5" ry="2" fill="#fb7185" opacity="0.55" />
+      {face === 'player' ? (
+        <path d="M -5 5 Q 0 10 5 5" stroke="#1e1b3a" strokeWidth="2.2" fill="none" strokeLinecap="round" />
+      ) : (
+        <path d="M -4 7 Q 0 4 4 7" stroke="#1e1b3a" strokeWidth="2.2" fill="none" strokeLinecap="round" />
+      )}
+    </g>
+  </g>
+);
+
+interface GameBoardProps {
+  onHome: () => void;
+}
+
+export const GameBoard: React.FC<GameBoardProps> = ({ onHome }) => {
   const gameState = useGameStore();
-  const { playerPos, aiPos, validMoves, walls, currentTurn, gameStatus, playerWallsLeft } = gameState;
-  const [dragState, setDragState] = useState<DragState>({
-    type: null,
-    startPos: null,
-    startX: 0,
-    startY: 0,
-    currentX: 0,
-    currentY: 0,
-    direction: null,
-    edgeType: null,
-  });
+  const { playerPos, aiPos, validMoves, walls, currentTurn, gameStatus, playerWallsLeft, aiWallsLeft, moveHistory } =
+    gameState;
+  const [dragState, setDragState] = useState<DragState>(NO_DRAG);
   const [previewWall, setPreviewWall] = useState<{ row: number; col: number; direction: 'horizontal' | 'vertical' } | null>(null);
   const [previewLine, setPreviewLine] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const [confirmResign, setConfirmResign] = useState(false);
   const svgRef = useRef<SVGSVGElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const size = useSquareFit(boxRef);
+
+  const playing = gameStatus === 'playing';
+  const myTurn = playing && currentTurn === 'player';
+  const canGoBack = myTurn && moveHistory.some((m) => m.player === 'player');
+
+  const resetDrag = () => {
+    setDragState(NO_DRAG);
+    setPreviewWall(null);
+    setPreviewLine(null);
+    gameState.setHoverCell(null);
+  };
 
   /**
    * Board coordinates (SVG units, without the 10px frame) of a client point. The SVG
-   * is scaled down to fit narrow screens, so client pixels are not SVG units.
+   * is scaled to fit the screen, so client pixels are not SVG units.
    */
   const toBoard = (clientX: number, clientY: number): { x: number; y: number } | null => {
     if (!svgRef.current) return null;
     const rect = svgRef.current.getBoundingClientRect();
-    const scale = (boardSize + 20) / rect.width;
+    const scale = VIEW / rect.width;
     return { x: (clientX - rect.left) * scale - 10, y: (clientY - rect.top) * scale - 10 };
   };
 
   const getCellFromCoords = (clientX: number, clientY: number): { row: number; col: number } | null => {
     const p = toBoard(clientX, clientY);
     if (!p) return null;
-    const { x, y } = p;
-
-    const col = Math.floor(x / CELL_SIZE);
-    const row = Math.floor(y / CELL_SIZE);
-
-    if (row >= 0 && row <= 8 && col >= 0 && col <= 8) {
-      return { row, col };
-    }
-    return null;
+    const col = Math.floor(p.x / CELL_SIZE);
+    const row = Math.floor(p.y / CELL_SIZE);
+    return row >= 0 && row <= 8 && col >= 0 && col <= 8 ? { row, col } : null;
   };
 
   const getEdgeType = (clientX: number, clientY: number): { type: 'piece' | 'wall' | null; edgeType?: 'horizontal' | 'vertical' } => {
@@ -67,36 +160,35 @@ export const GameBoard: React.FC = () => {
     if (!p) return { type: null };
     const { x, y } = p;
 
-    // Check if clicking on player piece
+    // Check if pressing on the player's piece
     const playerX = playerPos.col * CELL_SIZE + CELL_SIZE / 2;
     const playerY = playerPos.row * CELL_SIZE + CELL_SIZE / 2;
-    const distToPlayer = Math.sqrt((x - playerX) ** 2 + (y - playerY) ** 2);
-    if (distToPlayer < 25) {
-      return { type: 'piece' };
-    }
+    if (Math.sqrt((x - playerX) ** 2 + (y - playerY) ** 2) < 25) return { type: 'piece' };
 
-    // Get position within cell
     const posInCellX = x % CELL_SIZE;
     const posInCellY = y % CELL_SIZE;
-
-    // Detect if on edge
     const nearLeft = posInCellX < EDGE_THRESHOLD;
     const nearRight = posInCellX > CELL_SIZE - EDGE_THRESHOLD;
     const nearTop = posInCellY < EDGE_THRESHOLD;
     const nearBottom = posInCellY > CELL_SIZE - EDGE_THRESHOLD;
 
-    if ((nearLeft || nearRight) && playerWallsLeft > 0) {
-      return { type: 'wall', edgeType: 'vertical' };
-    }
-    if ((nearTop || nearBottom) && playerWallsLeft > 0) {
-      return { type: 'wall', edgeType: 'horizontal' };
-    }
-
+    if ((nearLeft || nearRight) && playerWallsLeft > 0) return { type: 'wall', edgeType: 'vertical' };
+    if ((nearTop || nearBottom) && playerWallsLeft > 0) return { type: 'wall', edgeType: 'horizontal' };
     return { type: null };
   };
 
-  const handleMouseDown = (e: React.PointerEvent<SVGSVGElement>) => {
-    if (gameStatus !== 'playing' || currentTurn !== 'player') return;
+  /** Move to the tapped cell if it is a legal destination. */
+  const tryTapMove = (clientX: number, clientY: number): boolean => {
+    const cell = getCellFromCoords(clientX, clientY);
+    if (cell && validMoves.some((m) => m.row === cell.row && m.col === cell.col)) {
+      gameState.playerMove(cell.row, cell.col);
+      return true;
+    }
+    return false;
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!myTurn) return;
     // Keep receiving move/up events for this touch or mouse drag even outside the board.
     e.currentTarget.setPointerCapture(e.pointerId);
 
@@ -104,421 +196,324 @@ export const GameBoard: React.FC = () => {
 
     // Tapping a highlighted cell moves there directly (dragging the piece also works).
     if (edgeType.type === null) {
-      const cell = getCellFromCoords(e.clientX, e.clientY);
-      if (cell && validMoves.some((m) => m.row === cell.row && m.col === cell.col)) {
-        gameState.playerMove(cell.row, cell.col);
-        return;
-      }
+      tryTapMove(e.clientX, e.clientY);
+      return;
     }
 
-    if (edgeType.type === 'piece') {
-      setDragState({
-        type: 'piece',
-        startPos: { row: playerPos.row, col: playerPos.col },
-        startX: e.clientX,
-        startY: e.clientY,
-        currentX: e.clientX,
-        currentY: e.clientY,
-        direction: null,
-        edgeType: null,
-      });
-    } else if (edgeType.type === 'wall') {
-      setDragState({
-        type: 'wall',
-        startPos: null,
-        startX: e.clientX,
-        startY: e.clientY,
-        currentX: e.clientX,
-        currentY: e.clientY,
-        direction: null,
-        edgeType: edgeType.edgeType || null,
-      });
-    }
+    setDragState({
+      type: edgeType.type,
+      startPos: edgeType.type === 'piece' ? { row: playerPos.row, col: playerPos.col } : null,
+      startX: e.clientX,
+      startY: e.clientY,
+      currentX: e.clientX,
+      currentY: e.clientY,
+      direction: null,
+      edgeType: edgeType.edgeType || null,
+    });
   };
 
-  const handleMouseMove = (e: React.PointerEvent<SVGSVGElement>) => {
+  const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     if (!dragState.type) return;
 
     if (dragState.type === 'piece' && dragState.startPos) {
       const cell = getCellFromCoords(e.clientX, e.clientY);
-      if (cell) {
-        gameState.setHoverCell(cell);
-      }
-    } else if (dragState.type === 'wall') {
-      const cur = toBoard(e.clientX, e.clientY);
-      const start = toBoard(dragState.startX, dragState.startY);
-      if (!cur || !start) return;
-      const svgX = cur.x;
-      const svgY = cur.y;
-
-      const dx = cur.x - start.x;
-      const dy = cur.y - start.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-
-      // Determine direction once threshold crossed
-      let direction = dragState.direction;
-      if (direction === null && distance > DIRECTION_THRESHOLD) {
-        direction = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
-      }
-
-      // Show preview line that follows user's drag
-      const startSvgX = start.x;
-      const startSvgY = start.y;
-
-      if (direction === 'horizontal') {
-        // Draw horizontal line
-        setPreviewLine({
-          x1: startSvgX - 20,
-          y1: startSvgY,
-          x2: svgX + 20,
-          y2: startSvgY,
-        });
-
-        // Calculate wall position on grid
-        const row = Math.floor((startSvgY - CELL_SIZE / 2) / CELL_SIZE);
-        const col = Math.floor(svgX / CELL_SIZE);
-        if (row >= 0 && row < 8 && col >= 0 && col < 8) {
-          setPreviewWall({ row, col, direction: 'horizontal' });
-        }
-      } else if (direction === 'vertical') {
-        // Draw vertical line
-        setPreviewLine({
-          x1: startSvgX,
-          y1: startSvgY - 20,
-          x2: startSvgX,
-          y2: svgY + 20,
-        });
-
-        // Calculate wall position on grid
-        const row = Math.floor(svgY / CELL_SIZE);
-        const col = Math.floor((startSvgX - CELL_SIZE / 2) / CELL_SIZE);
-        if (row >= 0 && row < 8 && col >= 0 && col < 8) {
-          setPreviewWall({ row, col, direction: 'vertical' });
-        }
-      } else {
-        // Not enough distance yet - show line following user's drag
-        setPreviewLine({
-          x1: startSvgX,
-          y1: startSvgY,
-          x2: svgX,
-          y2: svgY,
-        });
-      }
-
-      // Update drag state with current position and direction
-      setDragState((prev) => ({
-        ...prev,
-        currentX: e.clientX,
-        currentY: e.clientY,
-        direction,
-      }));
+      if (cell) gameState.setHoverCell(cell);
+      return;
     }
-  };
 
-  const handleMouseUp = (e: React.PointerEvent<SVGSVGElement>) => {
-    if (dragState.type === 'piece' && dragState.startPos) {
-      const cell = getCellFromCoords(e.clientX, e.clientY);
+    const cur = toBoard(e.clientX, e.clientY);
+    const start = toBoard(dragState.startX, dragState.startY);
+    if (!cur || !start) return;
 
-      if (cell && validMoves.some((m) => m.row === cell.row && m.col === cell.col)) {
-        gameState.playerMove(cell.row, cell.col);
-      }
+    const dx = cur.x - start.x;
+    const dy = cur.y - start.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
 
-      setDragState({
-        type: null,
-        startPos: null,
-        startX: 0,
-        startY: 0,
-        currentX: 0,
-        currentY: 0,
-        direction: null,
-        edgeType: null,
-      });
-      gameState.setHoverCell(null);
-    } else if (dragState.type === 'wall' && previewWall) {
-      // Place wall
-      const wall: Wall = {
-        row: previewWall.row,
-        col: previewWall.col,
-        direction: previewWall.direction,
-        placedBy: 'player',
-      };
+    // Determine direction once threshold crossed
+    let direction = dragState.direction;
+    if (direction === null && distance > DIRECTION_THRESHOLD) {
+      direction = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
+    }
 
-      gameState.playerPlaceWall(wall);
-      setPreviewWall(null);
-      setPreviewLine(null);
-      setDragState({
-        type: null,
-        startPos: null,
-        startX: 0,
-        startY: 0,
-        currentX: 0,
-        currentY: 0,
-        direction: null,
-        edgeType: null,
-      });
+    if (direction === 'horizontal') {
+      setPreviewLine({ x1: start.x - 20, y1: start.y, x2: cur.x + 20, y2: start.y });
+      const row = Math.floor((start.y - CELL_SIZE / 2) / CELL_SIZE);
+      const col = Math.floor(cur.x / CELL_SIZE);
+      if (row >= 0 && row < 8 && col >= 0 && col < 8) setPreviewWall({ row, col, direction: 'horizontal' });
+    } else if (direction === 'vertical') {
+      setPreviewLine({ x1: start.x, y1: start.y - 20, x2: start.x, y2: cur.y + 20 });
+      const row = Math.floor(cur.y / CELL_SIZE);
+      const col = Math.floor((start.x - CELL_SIZE / 2) / CELL_SIZE);
+      if (row >= 0 && row < 8 && col >= 0 && col < 8) setPreviewWall({ row, col, direction: 'vertical' });
     } else {
-      setDragState({
-        type: null,
-        startPos: null,
-        startX: 0,
-        startY: 0,
-        currentX: 0,
-        currentY: 0,
-        direction: null,
-        edgeType: null,
-      });
-      setPreviewWall(null);
-      setPreviewLine(null);
-      gameState.setHoverCell(null);
+      setPreviewLine({ x1: start.x, y1: start.y, x2: cur.x, y2: cur.y });
     }
+
+    setDragState((prev) => ({ ...prev, currentX: e.clientX, currentY: e.clientY, direction }));
   };
+
+  const handlePointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (dragState.type === 'piece' && dragState.startPos) {
+      tryTapMove(e.clientX, e.clientY);
+    } else if (dragState.type === 'wall' && previewWall && dragState.direction) {
+      const wall: Wall = { row: previewWall.row, col: previewWall.col, direction: previewWall.direction, placedBy: 'player' };
+      gameState.playerPlaceWall(wall);
+    } else if (dragState.type === 'wall') {
+      // A press near a cell edge that barely moved was meant as a tap on that cell.
+      const start = toBoard(dragState.startX, dragState.startY);
+      const end = toBoard(e.clientX, e.clientY);
+      if (start && end && Math.hypot(end.x - start.x, end.y - start.y) < TAP_SLOP) {
+        tryTapMove(dragState.startX, dragState.startY);
+      }
+    }
+    resetDrag();
+  };
+
+  const turnLabel = !playing ? '게임 종료' : myTurn ? '내 차례' : 'AI가 생각 중…';
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-[#0f1419] via-[#1a1a2e] to-[#0f1419] p-2 sm:p-4">
-      <div className="bg-[#1a1a2e] rounded-2xl p-3 sm:p-8 border-4 border-[#06b6d4] shadow-2xl w-full max-w-[640px]">
-        <h1 className="text-center text-3xl font-bold text-cyan-400 mb-2">🎮 쿼리도</h1>
-        <p className="text-center text-gray-400 text-sm mb-6">
-          👤 말을 드래그해 이동 | 🧱 보드 가장자리를 드래그해 벽 그리기
-        </p>
+    <div className="app-screen flex flex-col px-3 pt-3 pb-4 gap-3 select-none">
+      {/* Top bar: home, elapsed time, level */}
+      <header className="flex items-center justify-between gap-2">
+        <button
+          onClick={onHome}
+          aria-label="홈으로"
+          className="w-11 h-11 rounded-2xl bg-white/10 text-xl flex items-center justify-center shadow-glow-lilac active:scale-90 transition-transform"
+        >
+          🏠
+        </button>
+        <div className="px-4 py-1.5 rounded-full bg-white/10 shadow-glow-sky text-sky-100 font-bold tabular-nums text-lg">
+          ⏱ <ElapsedTime start={gameState.gameStartTime} end={gameState.gameEndTime} />
+        </div>
+        <div className="px-3 py-1.5 rounded-full bg-white/10 text-sm font-semibold text-violet-100 shadow-glow-lilac whitespace-nowrap">
+          {LEVEL_LABEL[gameState.aiLevel] ?? gameState.aiLevel}
+        </div>
+      </header>
 
-        {/* Board */}
-        <div className="relative block bg-[#0f1419] rounded-lg p-1 sm:p-2 border-2 border-[#2a2a4e] mb-6">
+      {/* Status: walls left and whose turn */}
+      <div className="flex items-center justify-between text-sm">
+        <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-teal-300/10 text-teal-200 shadow-glow-mint">
+          <span className="inline-block w-3 h-3 rounded-full bg-teal-300" /> 나 · 벽 <b>{playerWallsLeft}</b>
+        </div>
+        <div
+          className={`px-3 py-1 rounded-full font-bold ${
+            myTurn ? 'text-teal-200 glow-text-mint' : playing ? 'text-pink-200 glow-text-pink animate-pulse' : 'text-violet-200'
+          }`}
+        >
+          {turnLabel}
+        </div>
+        <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-pink-300/10 text-pink-200 shadow-glow-pink">
+          AI · 벽 <b>{aiWallsLeft}</b> <span className="inline-block w-3 h-3 rounded-full bg-pink-300" />
+        </div>
+      </div>
+
+      {/* Board: the largest square that fits the remaining space */}
+      <div ref={boxRef} className="flex-1 min-h-0 flex items-center justify-center">
+        {size > 0 && (
           <svg
             ref={svgRef}
-            viewBox={`0 0 ${boardSize + 20} ${boardSize + 20}`}
-            className="bg-gradient-to-br from-[#1f2f4a] to-[#0f1419] block mx-auto"
-            // Scales down to the screen width; touch-action none stops the browser from
-            // turning a drag on the board into a page scroll.
-            style={{ width: '100%', maxWidth: boardSize + 20, height: 'auto', borderRadius: '8px', userSelect: 'none', touchAction: 'none' }}
-            onPointerDown={handleMouseDown}
-            onPointerMove={handleMouseMove}
-            onPointerUp={handleMouseUp}
-            onPointerCancel={() => {
-              setDragState({
-                type: null,
-                startPos: null,
-                startX: 0,
-                startY: 0,
-                currentX: 0,
-                currentY: 0,
-                direction: null,
-                edgeType: null,
-              });
-              setPreviewWall(null);
-              setPreviewLine(null);
-              gameState.setHoverCell(null);
-            }}
+            width={size}
+            height={size}
+            viewBox={`0 0 ${VIEW} ${VIEW}`}
+            className="rounded-3xl shadow-glow-board"
+            // touch-action none stops the browser from turning a drag on the board into a scroll.
+            style={{ touchAction: 'none', background: 'linear-gradient(145deg, #2a1f55, #16213e)' }}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={resetDrag}
           >
-            {/* Grid cells */}
-            {Array(9)
-              .fill(null)
-              .map((_, row) =>
-                Array(9)
-                  .fill(null)
-                  .map((_, col) => {
-                    const isValid = validMoves.some((m) => m.row === row && m.col === col);
-                    const isHover =
-                      gameState.hoverCell?.row === row &&
-                      gameState.hoverCell?.col === col &&
-                      dragState.type === 'piece';
-                    const x = col * CELL_SIZE + 10;
-                    const y = row * CELL_SIZE + 10;
+            <defs>
+              <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="4" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+              {/*
+                Walls are straight lines whose bounding box has zero width or height, so a
+                bounding-box filter region would clip them away; give them a region in board
+                units instead. (Pawns are drawn in a translated frame and keep the default.)
+              */}
+              <filter id="glow-line" filterUnits="userSpaceOnUse" x="0" y="0" width={VIEW} height={VIEW}>
+                <feGaussianBlur stdDeviation="4" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+            </defs>
 
-                    return (
-                      <g key={`cell-${row}-${col}`}>
-                        {/* Cell background */}
-                        <rect
-                          x={x}
-                          y={y}
-                          width={CELL_SIZE}
-                          height={CELL_SIZE}
-                          fill={isHover ? '#3a5a8a' : (row + col) % 2 === 0 ? '#2a4a6a' : '#1a3a5a'}
-                          stroke="#3a5a7a"
-                          strokeWidth="2"
-                          className="transition-colors"
-                        />
+            {/* Cells */}
+            {Array.from({ length: 9 }, (_, row) =>
+              Array.from({ length: 9 }, (_, col) => {
+                const isValid = validMoves.some((m) => m.row === row && m.col === col);
+                const isHover =
+                  gameState.hoverCell?.row === row && gameState.hoverCell?.col === col && dragState.type === 'piece';
+                const x = col * CELL_SIZE + 10;
+                const y = row * CELL_SIZE + 10;
+                // Goal rows are outlined in the colour of the side that must reach them.
+                const goal = row === 8 ? PLAYER : row === 0 ? AI : 'none';
+                return (
+                  <g key={`cell-${row}-${col}`}>
+                    <rect
+                      x={x + 4}
+                      y={y + 4}
+                      width={CELL_SIZE - 8}
+                      height={CELL_SIZE - 8}
+                      rx={12}
+                      fill={isHover ? '#5b4b9a' : (row + col) % 2 === 0 ? '#3b2f6e' : '#33296a'}
+                      stroke={goal}
+                      strokeOpacity={0.35}
+                      strokeWidth={2}
+                    />
+                    {isValid && dragState.type !== 'wall' && (
+                      <circle
+                        cx={x + CELL_SIZE / 2}
+                        cy={y + CELL_SIZE / 2}
+                        r={9}
+                        fill={PLAYER}
+                        filter="url(#glow)"
+                        className="move-dot"
+                      />
+                    )}
+                  </g>
+                );
+              })
+            )}
 
-                        {/* Valid move indicators */}
-                        {isValid && dragState.type !== 'wall' && (
-                          <>
-                            <circle
-                              cx={x + CELL_SIZE / 2}
-                              cy={y + CELL_SIZE / 2}
-                              r={8}
-                              fill="#10b981"
-                              opacity="0.9"
-                            />
-                            <circle
-                              cx={x + CELL_SIZE / 2}
-                              cy={y + CELL_SIZE / 2}
-                              r={14}
-                              fill="none"
-                              stroke="#10b981"
-                              strokeWidth="2"
-                              opacity="0.5"
-                            />
-                          </>
-                        )}
-                      </g>
-                    );
-                  })
-              )}
-
-            {/* Preview line while dragging (follows user's drag) */}
+            {/* Preview line while dragging (follows the finger) */}
             {previewLine && dragState.type === 'wall' && (
               <line
-                x1={previewLine.x1}
-                y1={previewLine.y1}
-                x2={previewLine.x2}
-                y2={previewLine.y2}
-                stroke="#fbbf24"
-                strokeWidth={dragState.direction ? WALL_THICKNESS : 2}
+                {...previewLine}
+                stroke={PREVIEW}
+                strokeWidth={dragState.direction ? WALL_THICKNESS : 3}
                 strokeLinecap="round"
                 opacity="0.8"
+                filter="url(#glow-line)"
               />
             )}
 
             {/* Snapped preview wall (after direction determined) */}
             {previewWall && dragState.direction && (
-              <g opacity="0.7">
-                {previewWall.direction === 'horizontal' ? (
-                  <line
-                    x1={previewWall.col * CELL_SIZE + 10}
-                    y1={(previewWall.row + 1) * CELL_SIZE + 10}
-                    x2={(previewWall.col + 2) * CELL_SIZE + 10}
-                    y2={(previewWall.row + 1) * CELL_SIZE + 10}
-                    stroke="#34d399"
-                    strokeWidth={WALL_THICKNESS}
-                    strokeLinecap="round"
-                  />
-                ) : (
-                  <line
-                    x1={(previewWall.col + 1) * CELL_SIZE + 10}
-                    y1={previewWall.row * CELL_SIZE + 10}
-                    x2={(previewWall.col + 1) * CELL_SIZE + 10}
-                    y2={(previewWall.row + 2) * CELL_SIZE + 10}
-                    stroke="#34d399"
-                    strokeWidth={WALL_THICKNESS}
-                    strokeLinecap="round"
-                  />
-                )}
-              </g>
+              <line
+                x1={previewWall.direction === 'horizontal' ? previewWall.col * CELL_SIZE + 10 : (previewWall.col + 1) * CELL_SIZE + 10}
+                y1={previewWall.direction === 'horizontal' ? (previewWall.row + 1) * CELL_SIZE + 10 : previewWall.row * CELL_SIZE + 10}
+                x2={previewWall.direction === 'horizontal' ? (previewWall.col + 2) * CELL_SIZE + 10 : (previewWall.col + 1) * CELL_SIZE + 10}
+                y2={previewWall.direction === 'horizontal' ? (previewWall.row + 1) * CELL_SIZE + 10 : (previewWall.row + 2) * CELL_SIZE + 10}
+                stroke={PREVIEW}
+                strokeWidth={WALL_THICKNESS}
+                strokeLinecap="round"
+                opacity="0.6"
+              />
             )}
 
             {/* Walls on board */}
             {walls.map((wall, idx) => {
               const x = wall.col * CELL_SIZE + 10;
               const y = wall.row * CELL_SIZE + 10;
-              const wallStroke = wall.placedBy === 'player' ? '#06b6d4' : '#10b981';
-
-              if (wall.direction === 'horizontal') {
-                return (
-                  <line
-                    key={`wall-${idx}`}
-                    x1={x}
-                    y1={y + CELL_SIZE}
-                    x2={x + CELL_SIZE * 2}
-                    y2={y + CELL_SIZE}
-                    stroke={wallStroke}
-                    strokeWidth={WALL_THICKNESS}
-                    strokeLinecap="round"
-                  />
-                );
-              } else {
-                return (
-                  <line
-                    key={`wall-${idx}`}
-                    x1={x + CELL_SIZE}
-                    y1={y}
-                    x2={x + CELL_SIZE}
-                    y2={y + CELL_SIZE * 2}
-                    stroke={wallStroke}
-                    strokeWidth={WALL_THICKNESS}
-                    strokeLinecap="round"
-                  />
-                );
-              }
+              const horizontal = wall.direction === 'horizontal';
+              return (
+                <line
+                  key={`wall-${idx}`}
+                  x1={horizontal ? x + 3 : x + CELL_SIZE}
+                  y1={horizontal ? y + CELL_SIZE : y + 3}
+                  x2={horizontal ? x + CELL_SIZE * 2 - 3 : x + CELL_SIZE}
+                  y2={horizontal ? y + CELL_SIZE : y + CELL_SIZE * 2 - 3}
+                  stroke={wall.placedBy === 'player' ? PLAYER : AI}
+                  strokeWidth={WALL_THICKNESS}
+                  strokeLinecap="round"
+                  filter="url(#glow-line)"
+                />
+              );
             })}
 
-            {/* Player piece */}
-            <g
-              transform={`translate(${playerPos.col * CELL_SIZE + CELL_SIZE / 2 + 10}, ${playerPos.row * CELL_SIZE + CELL_SIZE / 2 + 10})`}
-              className={dragState.type === 'piece' ? 'opacity-70' : ''}
-              style={{ cursor: currentTurn === 'player' ? 'grab' : 'default' }}
-            >
-              <ellipse cx="0" cy="20" rx="18" ry="5" fill="#000000" opacity="0.3" />
-              <defs>
-                <radialGradient id="playerGradient" cx="35%" cy="35%">
-                  <stop offset="0%" style={{ stopColor: '#3dd9ff', stopOpacity: 1 }} />
-                  <stop offset="100%" style={{ stopColor: '#06b6d4', stopOpacity: 1 }} />
-                </radialGradient>
-              </defs>
-              <circle cx="0" cy="0" r="20" fill="url(#playerGradient)" />
-              <circle cx="-8" cy="-5" r="3" fill="#ffffff" />
-              <circle cx="8" cy="-5" r="3" fill="#ffffff" />
-              <circle cx="-8" cy="-5" r="1.5" fill="#06b6d4" />
-              <circle cx="8" cy="-5" r="1.5" fill="#06b6d4" />
-              <path d="M -8 3 Q 0 8 8 3" stroke="#ffffff" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-              <circle cx="-7" cy="-8" r="3" fill="#ffffff" opacity="0.4" />
-              <circle cx="0" cy="0" r="20" fill="none" stroke="#ffffff" strokeWidth="2.5" />
-            </g>
-
-            {/* AI piece */}
-            <g transform={`translate(${aiPos.col * CELL_SIZE + CELL_SIZE / 2 + 10}, ${aiPos.row * CELL_SIZE + CELL_SIZE / 2 + 10})`}>
-              <ellipse cx="0" cy="20" rx="18" ry="5" fill="#000000" opacity="0.3" />
-              <defs>
-                <radialGradient id="aiGradient" cx="35%" cy="35%">
-                  <stop offset="0%" style={{ stopColor: '#34d399', stopOpacity: 1 }} />
-                  <stop offset="100%" style={{ stopColor: '#10b981', stopOpacity: 1 }} />
-                </radialGradient>
-              </defs>
-              <circle cx="0" cy="0" r="20" fill="url(#aiGradient)" />
-              <rect x="-10" y="-7" width="5" height="6" fill="#ffffff" rx="1" />
-              <rect x="5" y="-7" width="5" height="6" fill="#ffffff" rx="1" />
-              <rect x="-10" y="-7" width="5" height="3" fill="#10b981" rx="1" />
-              <rect x="5" y="-7" width="5" height="3" fill="#10b981" rx="1" />
-              <line x1="-8" y1="5" x2="8" y2="5" stroke="#ffffff" strokeWidth="2.5" strokeLinecap="round" />
-              <circle cx="-7" cy="-8" r="3" fill="#ffffff" opacity="0.4" />
-              <circle cx="0" cy="0" r="20" fill="none" stroke="#ffffff" strokeWidth="2.5" />
-            </g>
+            <Pawn row={aiPos.row} col={aiPos.col} color={AI} face="ai" />
+            <Pawn row={playerPos.row} col={playerPos.col} color={PLAYER} face="player" dim={dragState.type === 'piece'} />
           </svg>
-        </div>
-
-        {/* Game Info */}
-        <div className="bg-[#0f1419] rounded-lg p-4 border border-[#2a2a4e] space-y-3">
-          <div className="flex justify-between items-center">
-            <div>
-              <span className="text-gray-400">당신의 벽:</span>
-              <span className="ml-2 text-cyan-400 font-bold text-lg">{playerWallsLeft}/10</span>
-            </div>
-            <div>
-              <span className="text-gray-400">AI의 벽:</span>
-              <span className="ml-2 text-emerald-400 font-bold text-lg">{gameState.aiWallsLeft}/10</span>
-            </div>
-          </div>
-
-          <div className="text-center">
-            <span className="text-gray-400">턴:</span>
-            <span className={`ml-2 font-bold text-lg ${currentTurn === 'player' ? 'text-cyan-400' : 'text-emerald-400'}`}>
-              {currentTurn === 'player' ? '👤 당신' : '🤖 AI'}
-            </span>
-          </div>
-
-          {currentTurn === 'ai' && gameStatus === 'playing' && (
-            <div className="text-center">
-              <span className="text-emerald-400 text-sm animate-pulse">
-                💭 AI가 최적의 수를 계산하고 있습니다...
-              </span>
-            </div>
-          )}
-
-          {gameStatus !== 'playing' && (
-            <div className={`text-center font-bold text-xl p-3 rounded ${gameStatus === 'won' ? 'bg-emerald-900 text-emerald-300' : 'bg-red-900 text-red-300'}`}>
-              {gameStatus === 'won' ? '🎉 승리! 축하합니다!' : '😢 패배'}
-            </div>
-          )}
-        </div>
+        )}
       </div>
+
+      <p className="text-center text-xs text-violet-200/70">탭하거나 말을 끌어서 이동 · 칸 가장자리를 끌어서 벽 놓기</p>
+
+      {/* Bottom actions */}
+      <footer className="grid grid-cols-2 gap-3">
+        <button
+          onClick={() => gameState.goBack()}
+          disabled={!canGoBack}
+          className="py-3 rounded-2xl font-bold bg-sky-300/15 text-sky-100 shadow-glow-sky active:scale-95 transition-transform disabled:opacity-35 disabled:shadow-none"
+        >
+          ↩ 이전으로
+        </button>
+        <button
+          onClick={() => setConfirmResign(true)}
+          disabled={!playing}
+          className="py-3 rounded-2xl font-bold bg-pink-300/15 text-pink-100 shadow-glow-pink active:scale-95 transition-transform disabled:opacity-35 disabled:shadow-none"
+        >
+          🏳 포기
+        </button>
+      </footer>
+
+      {/* Resign confirmation */}
+      {confirmResign && playing && (
+        <Overlay>
+          <p className="text-4xl">🥺</p>
+          <p className="text-lg font-bold text-pink-100">정말 포기할까요?</p>
+          <div className="grid grid-cols-2 gap-3 w-full">
+            <button
+              onClick={() => setConfirmResign(false)}
+              className="py-3 rounded-2xl font-bold bg-white/10 text-violet-100 active:scale-95 transition-transform"
+            >
+              계속하기
+            </button>
+            <button
+              onClick={() => {
+                setConfirmResign(false);
+                gameState.resignGame();
+              }}
+              className="py-3 rounded-2xl font-bold bg-pink-400/80 text-white shadow-glow-pink active:scale-95 transition-transform"
+            >
+              포기하기
+            </button>
+          </div>
+        </Overlay>
+      )}
+
+      {/* Result */}
+      {!playing && (
+        <Overlay>
+          <p className="text-5xl">{gameStatus === 'won' ? '🎉' : '😢'}</p>
+          <p className={`text-2xl font-extrabold ${gameStatus === 'won' ? 'text-teal-200 glow-text-mint' : 'text-pink-200 glow-text-pink'}`}>
+            {gameStatus === 'won' ? '승리!' : '패배'}
+          </p>
+          <p className="text-sm text-violet-200">
+            {LEVEL_LABEL[gameState.aiLevel] ?? gameState.aiLevel} · ⏱ {formatElapsed(gameState.gameEndTime - gameState.gameStartTime)}
+          </p>
+          <div className="grid grid-cols-2 gap-3 w-full">
+            <button
+              onClick={onHome}
+              className="py-3 rounded-2xl font-bold bg-white/10 text-violet-100 active:scale-95 transition-transform"
+            >
+              🏠 홈
+            </button>
+            <button
+              onClick={() => gameState.startGame(gameState.aiLevel)}
+              className="py-3 rounded-2xl font-bold bg-teal-300/80 text-[#1e1b3a] shadow-glow-mint active:scale-95 transition-transform"
+            >
+              다시 하기
+            </button>
+          </div>
+        </Overlay>
+      )}
     </div>
   );
 };
+
+const Overlay: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="fixed inset-0 z-20 flex items-center justify-center bg-[#0d0a1f]/70 backdrop-blur-sm p-6">
+    <div className="w-full max-w-xs rounded-3xl bg-[#2a1f55] p-6 flex flex-col items-center gap-3 shadow-glow-lilac animate-pop">
+      {children}
+    </div>
+  </div>
+);

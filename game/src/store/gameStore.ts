@@ -11,6 +11,31 @@ import { getAIMove } from '../utils/aiLogic';
 interface GameStoreExtended extends GameState {
   gameStartTime: number;
   gameEndTime: number;
+  /**
+   * Bumped whenever the game is restarted, rewound, resigned or left. An AI search that
+   * started under an older id finished too late and its move is dropped.
+   */
+  gameId: number;
+}
+
+/** Board state after replaying `history` from the initial position. */
+function rebuild(history: Move[], level: string): Partial<GameState> {
+  const state = initializeGame(level) as GameState;
+  for (const move of history) {
+    if (move.type === 'move') {
+      if (move.player === 'player') state.playerPos = move.to!;
+      else state.aiPos = move.to!;
+    } else if (move.type === 'placeWall') {
+      state.walls = [...state.walls, move.wall!];
+      applyWallToBoard(state.board, move.wall!);
+      if (move.player === 'player') state.playerWallsLeft--;
+      else state.aiWallsLeft--;
+    }
+  }
+  state.moveHistory = history;
+  state.currentTurn = history.length % 2 === 0 ? 'player' : 'ai';
+  state.validMoves = getValidMoves(state.playerPos, state.board, state.aiPos);
+  return state;
 }
 
 export const useGameStore = create<GameStoreExtended>((set, get) => ({
@@ -30,14 +55,10 @@ export const useGameStore = create<GameStoreExtended>((set, get) => ({
   hoverCell: null,
   gameStartTime: 0,
   gameEndTime: 0,
+  gameId: 0,
 
   startGame: (level: string) => {
-    const initialState = initializeGame(level);
-    set({ ...initialState, gameStartTime: Date.now(), gameEndTime: 0 } as any);
-
-    const state = get();
-    const validMoves = getValidMoves(state.playerPos, state.board, state.aiPos);
-    set({ validMoves });
+    set({ ...rebuild([], level), aiLevel: level as GameState['aiLevel'], gameStatus: 'playing', gameStartTime: Date.now(), gameEndTime: 0, gameId: get().gameId + 1 });
   },
 
   playerMove: (row: number, col: number) => {
@@ -73,11 +94,7 @@ export const useGameStore = create<GameStoreExtended>((set, get) => ({
       return;
     }
 
-    // Validate wall placement
-    const boardCopy = JSON.parse(JSON.stringify(state.board));
-    const isValid = isValidWallPlacement(wall, boardCopy, state.playerPos, state.aiPos);
-
-    if (!isValid) {
+    if (!isValidWallPlacement(wall, state.board, state.playerPos, state.aiPos, state.walls)) {
       console.warn('Invalid wall placement');
       return;
     }
@@ -92,44 +109,23 @@ export const useGameStore = create<GameStoreExtended>((set, get) => ({
     applyMove(state, move);
   },
 
-  undoMove: () => {
+  goBack: () => {
     const state = get();
-    if (state.moveHistory.length === 0) return;
-
-    const history = [...state.moveHistory];
-    history.pop();
-
-    const freshState = initializeGame(state.aiLevel as any);
-    let newState = { ...freshState } as any;
-
-    for (const move of history) {
-      if (move.type === 'move') {
-        if (move.player === 'player') {
-          newState.playerPos = move.to!;
-        } else {
-          newState.aiPos = move.to!;
-        }
-      } else if (move.type === 'placeWall') {
-        newState.walls.push(move.wall!);
-        applyWallToBoard(newState.board, move.wall!);
-
-        if (move.player === 'player') {
-          newState.playerWallsLeft--;
-        } else {
-          newState.aiWallsLeft--;
-        }
-      }
-    }
-
-    newState.moveHistory = history;
-    newState.currentTurn = history.length % 2 === 0 ? 'player' : 'ai';
-
-    const validMoves = getValidMoves(newState.playerPos, newState.board, newState.aiPos);
-    set({ ...newState, validMoves });
+    if (state.gameStatus !== 'playing' || state.currentTurn !== 'player') return;
+    // Rewind to just before the player's last move, dropping the AI's reply with it.
+    const lastPlayerMove = state.moveHistory.map((m) => m.player).lastIndexOf('player');
+    if (lastPlayerMove < 0) return;
+    set({ ...rebuild(state.moveHistory.slice(0, lastPlayerMove), state.aiLevel), gameId: state.gameId + 1 });
   },
 
   resignGame: () => {
-    set({ gameStatus: 'lost' });
+    const state = get();
+    if (state.gameStatus !== 'playing') return;
+    set({ gameStatus: 'lost', validMoves: [], gameEndTime: Date.now(), gameId: state.gameId + 1 });
+  },
+
+  leaveGame: () => {
+    set({ gameId: get().gameId + 1 });
   },
 
   setHoverCell: (cell: Position | null) => {
@@ -203,13 +199,14 @@ function applyMove(state: GameState, move: Move) {
 
   // AI turn
   if (nextPlayer === 'ai') {
-    // Show thinking state immediately
+    const gameId = useGameStore.getState().gameId;
+    // Short delay so the thinking state renders before the search starts.
     setTimeout(async () => {
-      const currentState = useGameStore.getState();
-      const aiMove = await getAIMove(currentState);
-      if (aiMove) {
-        applyMove(currentState, aiMove);
-      }
-    }, 100); // Short delay to ensure thinking state shows
+      const aiMove = await getAIMove(useGameStore.getState());
+      const current = useGameStore.getState();
+      // The player went back, resigned, restarted or left while the AI was thinking.
+      if (current.gameId !== gameId || current.gameStatus !== 'playing') return;
+      if (aiMove) applyMove(current, aiMove);
+    }, 100);
   }
 }

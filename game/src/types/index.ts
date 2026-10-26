@@ -48,8 +48,11 @@ export interface GameState {
   startGame: (level: string) => void;
   playerMove: (row: number, col: number) => void;
   playerPlaceWall: (wall: Wall) => void;
-  undoMove: () => void;
+  /** Rewind the player's last move together with the AI's reply. */
+  goBack: () => void;
   resignGame: () => void;
+  /** Leaving the game screen: cancels an AI move still being computed. */
+  leaveGame: () => void;
   setHoverCell: (cell: Position | null) => void;
   setSelectedCell: (cell: Position | null) => void;
 }

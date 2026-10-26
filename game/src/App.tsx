@@ -60,31 +60,12 @@ function App() {
         return <Home onGameStart={() => setCurrentPage('game')} />;
       case 'game':
         return (
-          <div className="bg-[#0f1419] min-h-screen">
-            <GameBoard />
-            <div className="flex justify-center gap-4 mt-8 pb-8">
-              <button
-                onClick={() => setCurrentPage('home')}
-                className="px-6 py-3 bg-gray-600 hover:bg-gray-700 text-white rounded-lg font-semibold"
-              >
-                홈으로
-              </button>
-              <button
-                onClick={() => useGameStore.getState().undoMove()}
-                className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold"
-              >
-                실행 취소
-              </button>
-              {gameStatus !== 'playing' && (
-                <button
-                  onClick={() => setCurrentPage('home')}
-                  className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold"
-                >
-                  새 게임
-                </button>
-              )}
-            </div>
-          </div>
+          <GameBoard
+            onHome={() => {
+              useGameStore.getState().leaveGame();
+              setCurrentPage('home');
+            }}
+          />
         );
       case 'leaderboard':
         return <Leaderboard />;
@@ -108,7 +89,7 @@ function App() {
   return (
     <div>
       {/* Navigation Bar */}
-      {currentPage !== 'game' && (
+      {!OFFLINE && currentPage !== 'game' && (
         <nav className="bg-[#1a1a2e] border-b border-[#2a2a4e] px-4 py-4">
           <div className="max-w-6xl mx-auto flex justify-between items-center">
             <h1
@@ -118,7 +99,6 @@ function App() {
               🎮 QUORIDOR
             </h1>
             <div className="flex gap-4">
-              {!OFFLINE && (<>
               <button
                 onClick={() => setCurrentPage('home')}
                 className={`px-4 py-2 rounded-lg font-semibold transition-all ${
@@ -151,7 +131,6 @@ function App() {
                   👤 프로필
                 </button>
               )}
-              </>)}
             </div>
           </div>
         </nav>

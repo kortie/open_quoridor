@@ -1,4 +1,4 @@
-package com.knoxmatrix.quoridor;
+package juanstudio.wallgame;
 
 import com.getcapacitor.BridgeActivity;
 

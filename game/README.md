@@ -209,5 +209,6 @@ npm run android:apk    # build:android → cap sync → gradlew assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+패키지명: `juanstudio.wallgame`.
 요구 사항: Node 18 이상(Capacitor 6), JDK 17, Android SDK(`ANDROID_HOME`). 처음 빌드할 때는 `android/local.properties`에 `sdk.dir=<SDK 경로>`가 필요합니다.
 엔진이 BigInt를 쓰므로 Android System WebView 67 이상이 필요합니다.
