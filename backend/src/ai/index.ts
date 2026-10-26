@@ -4,7 +4,7 @@
  */
 
 export { initBoard, getMoves, applyMove, getWinner, decodeWallAction, decodePawnMove } from './board.js';
-export { PAWN_MOVES } from './types.js';
+export { PAWN_MOVES, DIFFICULTY_LEVELS } from './types.js';
 export { bfs, getDistance, canReachGoal, getPathDiversity } from './pathfind.js';
 export { evaluate, evaluateForTT, WIN_THRESHOLD, LOSS_THRESHOLD } from './eval.js';
 export { getBestMove } from './search.js';

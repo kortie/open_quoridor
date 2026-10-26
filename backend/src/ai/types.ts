@@ -66,7 +66,9 @@ export const PAWN_MOVES = [
 ] as const;
 
 // Difficulty levels
-export type DifficultyLevel = 'Easy' | 'Normal' | 'Hard';
+export type DifficultyLevel = 'Easy' | 'Normal' | 'Hard' | 'VeryHard' | 'Expert';
+
+export const DIFFICULTY_LEVELS: readonly DifficultyLevel[] = ['Easy', 'Normal', 'Hard', 'VeryHard', 'Expert'];
 
 // Evaluation weights configuration
 export interface EvalWeights {
@@ -74,4 +76,6 @@ export interface EvalWeights {
   w2: number; // wall advantage weight
   w3: number; // mobility weight
   w4: number; // path diversity weight
+  w5?: number; // opponent path diversity weight
+  tempo?: number; // side-to-move bonus
 }

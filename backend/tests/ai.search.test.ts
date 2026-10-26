@@ -1,7 +1,9 @@
 import { initBoard, applyMove, getMoves, getWinner } from '../src/ai/board.js';
-import { getBestMove } from '../src/ai/search.js';
+import { getBestMove, searchBestMove } from '../src/ai/search.js';
 import { getDistance } from '../src/ai/pathfind.js';
-import { DifficultyLevel, QState } from '../src/ai/types.js';
+import { KNOWN_WIN } from '../src/ai/eval.js';
+import { getDifficultyConfig } from '../src/ai/config.js';
+import { DifficultyLevel, DIFFICULTY_LEVELS, QState } from '../src/ai/types.js';
 
 function assert(condition: boolean, message: string) {
   if (!condition) {
@@ -24,7 +26,7 @@ function makeRng(seed: number) {
 function testReturnsLegalMove() {
   const board = initBoard();
   const legal = new Set(getMoves(board));
-  for (const level of ['Easy', 'Normal', 'Hard'] as DifficultyLevel[]) {
+  for (const level of DIFFICULTY_LEVELS) {
     const move = getBestMove(board, level);
     assert(legal.has(move), `${level} returns a legal move (got ${move})`);
   }
@@ -85,7 +87,8 @@ function testNormalBeatsRandom() {
 // Test 5: Move reduces own distance or increases opponent's
 function testMoveIsPurposeful() {
   const board = initBoard();
-  const move = getBestMove(board, 'Normal');
+  // Noise is part of Normal's design; this checks the engine's judgement underneath it.
+  const move = searchBestMove(board, 'Normal', { allowRandomization: false }).move;
   const after = applyMove(board, move);
   const dMeBefore = getDistance(board, 0);
   const dMeAfter = getDistance(after, 0);
@@ -95,6 +98,63 @@ function testMoveIsPurposeful() {
   console.log(`✓ Test 5: Purposeful opening move (action ${move})`);
 }
 
+// Test 6: Must wall when the opponent is one step from goal and we are far behind
+function testBlocksImminentLoss() {
+  // P1 needs one step; P2 (to move) needs four.
+  const board: QState = { ...initBoard(), p1_row: 7, p1_col: 4, p2_row: 4, p2_col: 4, turn: 1 };
+  for (const level of ['Hard', 'VeryHard'] as DifficultyLevel[]) {
+    const move = searchBestMove(board, level, { allowRandomization: false, timeLimit: 500 }).move;
+    const after = applyMove(board, move);
+    assert(move >= 12, `${level} places a wall (got action ${move})`);
+    assert(getDistance(after, 0) > 1, `${level}'s wall lengthens the opponent's path`);
+  }
+  console.log('✓ Test 6: Walls off an imminent loss');
+}
+
+// Test 7: Pure race with no walls left: just run
+function testRacesWithoutWalls() {
+  const board: QState = { ...initBoard(), p1_row: 3, p1_col: 0, p2_row: 5, p2_col: 8, p1_walls: 0, p2_walls: 0 };
+  const info = searchBestMove(board, 'VeryHard', { allowRandomization: false, timeLimit: 500 });
+  const after = applyMove(board, info.move);
+  assert(getDistance(after, 0) < getDistance(board, 0), `advances in a won race (got action ${info.move})`);
+  assert(info.root[0].score > 0, `won race scores positive (${info.root[0].score})`);
+  console.log(`✓ Test 7: Races when walls are gone (score ${info.root[0].score})`);
+}
+
+// Test 8: Recognises a decided race when only the opponent is out of walls
+function testKnownWin() {
+  const board: QState = { ...initBoard(), p1_row: 5, p1_col: 4, p2_row: 6, p2_col: 0, p1_walls: 3, p2_walls: 0 };
+  const info = searchBestMove(board, 'VeryHard', { allowRandomization: false, timeLimit: 500 });
+  assert(info.root[0].score >= KNOWN_WIN - 1000, `decided race is scored as a win (${info.root[0].score})`);
+  console.log(`✓ Test 8: Recognises decided race (score ${info.root[0].score})`);
+}
+
+// Test 9: Strong levels do not burn walls in the opening
+function testNoEarlyWallSpam() {
+  let state = initBoard();
+  for (let ply = 0; ply < 6; ply++) {
+    state = applyMove(state, searchBestMove(state, 'VeryHard', { allowRandomization: false, timeLimit: 300 }).move);
+  }
+  const used = 20 - state.p1_walls - state.p2_walls;
+  assert(used <= 1, `at most one wall in the first 6 plies (used ${used})`);
+  console.log(`✓ Test 9: Opening keeps walls (${used} used in 6 plies)`);
+}
+
+// Test 10: Every level stays within its time limit
+function testLevelTimeLimits() {
+  // A mid-game position with walls on the board, where wall generation is busiest.
+  let state = initBoard();
+  for (const m of [1, 0, 1, 0, 12 + 4 * 8 + 3, 12 + 3 * 8 + 4, 1, 0]) state = applyMove(state, m);
+  for (const level of DIFFICULTY_LEVELS) {
+    const limit = getDifficultyConfig(level).timeLimit;
+    const start = Date.now();
+    searchBestMove(state, level);
+    const elapsed = Date.now() - start;
+    assert(elapsed <= limit + 150, `${level} took ${elapsed}ms (limit ${limit}ms)`);
+  }
+  console.log('✓ Test 10: All levels within their time limits');
+}
+
 export function runAllTests() {
   console.log('\n=== Running Phase 4/5 Search Tests ===\n');
   testReturnsLegalMove();
@@ -102,6 +162,11 @@ export function runAllTests() {
   testTimeLimit();
   testMoveIsPurposeful();
   testNormalBeatsRandom();
+  testBlocksImminentLoss();
+  testRacesWithoutWalls();
+  testKnownWin();
+  testNoEarlyWallSpam();
+  testLevelTimeLimits();
   console.log('\n✅ All search tests passed!\n');
 }
 
