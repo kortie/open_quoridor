@@ -15,6 +15,16 @@ const PLAYER = '#5eead4';
 const AI = '#f9a8d4';
 const PREVIEW = '#fde68a';
 
+/**
+ * The game model keeps the player on row 0 heading for row 8 (the engine's P1), but the
+ * board is drawn upside down so the player starts at the bottom. A cell on model row r is
+ * drawn on screen row 8 - r; a wall anchored on row r lies between rows r and r + 1, which
+ * on screen is wall row 7 - r. Both maps are their own inverse.
+ */
+const viewRow = (row: number) => 8 - row;
+const viewWallRow = (row: number) => 7 - row;
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
 const LEVEL_LABEL: Record<string, string> = {
   Easy: '🌱 쉬움',
   Normal: '🍀 보통',
@@ -152,7 +162,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ onHome }) => {
     if (!p) return null;
     const col = Math.floor(p.x / CELL_SIZE);
     const row = Math.floor(p.y / CELL_SIZE);
-    return row >= 0 && row <= 8 && col >= 0 && col <= 8 ? { row, col } : null;
+    return row >= 0 && row <= 8 && col >= 0 && col <= 8 ? { row: viewRow(row), col } : null;
   };
 
   const getEdgeType = (clientX: number, clientY: number): { type: 'piece' | 'wall' | null; edgeType?: 'horizontal' | 'vertical' } => {
@@ -162,7 +172,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ onHome }) => {
 
     // Check if pressing on the player's piece
     const playerX = playerPos.col * CELL_SIZE + CELL_SIZE / 2;
-    const playerY = playerPos.row * CELL_SIZE + CELL_SIZE / 2;
+    const playerY = viewRow(playerPos.row) * CELL_SIZE + CELL_SIZE / 2;
     if (Math.sqrt((x - playerX) ** 2 + (y - playerY) ** 2) < 25) return { type: 'piece' };
 
     const posInCellX = x % CELL_SIZE;
@@ -235,16 +245,20 @@ export const GameBoard: React.FC<GameBoardProps> = ({ onHome }) => {
       direction = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
     }
 
+    // The wall lies on the grid line nearest the press, starts at the pressed cell and
+    // runs two cells the way the finger moved. (Screen coordinates; flipped on placement.)
     if (direction === 'horizontal') {
-      setPreviewLine({ x1: start.x - 20, y1: start.y, x2: cur.x + 20, y2: start.y });
+      setPreviewLine({ x1: start.x, y1: start.y, x2: cur.x, y2: start.y });
       const row = Math.floor((start.y - CELL_SIZE / 2) / CELL_SIZE);
-      const col = Math.floor(cur.x / CELL_SIZE);
-      if (row >= 0 && row < 8 && col >= 0 && col < 8) setPreviewWall({ row, col, direction: 'horizontal' });
+      const startCol = Math.floor(start.x / CELL_SIZE);
+      const col = clamp(dx >= 0 ? startCol : startCol - 1, 0, 7);
+      setPreviewWall(row >= 0 && row < 8 ? { row, col, direction: 'horizontal' } : null);
     } else if (direction === 'vertical') {
-      setPreviewLine({ x1: start.x, y1: start.y - 20, x2: start.x, y2: cur.y + 20 });
-      const row = Math.floor(cur.y / CELL_SIZE);
+      setPreviewLine({ x1: start.x, y1: start.y, x2: start.x, y2: cur.y });
       const col = Math.floor((start.x - CELL_SIZE / 2) / CELL_SIZE);
-      if (row >= 0 && row < 8 && col >= 0 && col < 8) setPreviewWall({ row, col, direction: 'vertical' });
+      const startRow = Math.floor(start.y / CELL_SIZE);
+      const row = clamp(dy >= 0 ? startRow : startRow - 1, 0, 7);
+      setPreviewWall(col >= 0 && col < 8 ? { row, col, direction: 'vertical' } : null);
     } else {
       setPreviewLine({ x1: start.x, y1: start.y, x2: cur.x, y2: cur.y });
     }
@@ -256,7 +270,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ onHome }) => {
     if (dragState.type === 'piece' && dragState.startPos) {
       tryTapMove(e.clientX, e.clientY);
     } else if (dragState.type === 'wall' && previewWall && dragState.direction) {
-      const wall: Wall = { row: previewWall.row, col: previewWall.col, direction: previewWall.direction, placedBy: 'player' };
+      const wall: Wall = { row: viewWallRow(previewWall.row), col: previewWall.col, direction: previewWall.direction, placedBy: 'player' };
       gameState.playerPlaceWall(wall);
     } else if (dragState.type === 'wall') {
       // A press near a cell edge that barely moved was meant as a tap on that cell.
@@ -346,13 +360,14 @@ export const GameBoard: React.FC<GameBoardProps> = ({ onHome }) => {
             </defs>
 
             {/* Cells */}
-            {Array.from({ length: 9 }, (_, row) =>
+            {Array.from({ length: 9 }, (_, screenRow) =>
               Array.from({ length: 9 }, (_, col) => {
+                const row = viewRow(screenRow);
                 const isValid = validMoves.some((m) => m.row === row && m.col === col);
                 const isHover =
                   gameState.hoverCell?.row === row && gameState.hoverCell?.col === col && dragState.type === 'piece';
                 const x = col * CELL_SIZE + 10;
-                const y = row * CELL_SIZE + 10;
+                const y = screenRow * CELL_SIZE + 10;
                 // Goal rows are outlined in the colour of the side that must reach them.
                 const goal = row === 8 ? PLAYER : row === 0 ? AI : 'none';
                 return (
@@ -412,7 +427,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({ onHome }) => {
             {/* Walls on board */}
             {walls.map((wall, idx) => {
               const x = wall.col * CELL_SIZE + 10;
-              const y = wall.row * CELL_SIZE + 10;
+              const y = viewWallRow(wall.row) * CELL_SIZE + 10;
               const horizontal = wall.direction === 'horizontal';
               return (
                 <line
@@ -429,8 +444,8 @@ export const GameBoard: React.FC<GameBoardProps> = ({ onHome }) => {
               );
             })}
 
-            <Pawn row={aiPos.row} col={aiPos.col} color={AI} face="ai" />
-            <Pawn row={playerPos.row} col={playerPos.col} color={PLAYER} face="player" dim={dragState.type === 'piece'} />
+            <Pawn row={viewRow(aiPos.row)} col={aiPos.col} color={AI} face="ai" />
+            <Pawn row={viewRow(playerPos.row)} col={playerPos.col} color={PLAYER} face="player" dim={dragState.type === 'piece'} />
           </svg>
         )}
       </div>
