@@ -1,10 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace "juanstudio.wallgame"
+    namespace "com.juanstudio.wallgame"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "juanstudio.wallgame"
+        applicationId "com.juanstudio.wallgame"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

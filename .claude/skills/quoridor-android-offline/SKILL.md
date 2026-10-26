@@ -15,7 +15,7 @@ backend/src/ai/adapter.ts  # 프론트 요청 형태(AIDecisionRequest) <-> QSta
 game/src/engine/           # 앱 전용: aiWorker.ts(Web Worker), localAi.ts(워커 호출 + 타임아웃 + fallback)
 game/src/config.ts         # OFFLINE = import.meta.env.VITE_OFFLINE === 'true'
 game/.env.android          # VITE_OFFLINE=true  (vite build --mode android)
-game/capacitor.config.ts   # appId juanstudio.wallgame, webDir dist
+game/capacitor.config.ts   # appId com.juanstudio.wallgame, webDir dist
                            # 패키지명을 바꾸면 android/app/build.gradle(namespace, applicationId),
                            # res/values/strings.xml, MainActivity.java의 package와 디렉터리도 같이 바꾼다
 game/android/              # Capacitor가 생성한 Gradle 프로젝트 (커밋함, build 산출물은 .gitignore)

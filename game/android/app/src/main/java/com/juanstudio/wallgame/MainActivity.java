@@ -1,4 +1,4 @@
-package juanstudio.wallgame;
+package com.juanstudio.wallgame;
 
 import com.getcapacitor.BridgeActivity;
 
