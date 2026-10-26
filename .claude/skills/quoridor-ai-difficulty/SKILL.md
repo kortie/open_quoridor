@@ -5,7 +5,7 @@ description: Use when strengthening, tuning, or re-balancing the Quoridor AI eng
 
 # Quoridor AI 난이도/강도 개선
 
-엔진은 **TypeScript**(`backend/src/ai`)다. 스펙 문서(`quoridor-ai-spec.md`)는 C++로 적혀 있지만 따르지 않는다.
+엔진은 **TypeScript**(`backend/src/ai`)다.
 프론트엔드 플레이어 = 엔진 P1(row 0 → 8), AI = 엔진 P2(row 8 → 0), 매핑은 `backend/src/services/aiService.ts`의 `toQState`.
 
 설계 상세(알고리즘, 파라미터, 코드 위치)는 [references/design.md](references/design.md)에 있다. 구현 전에 반드시 읽는다.
